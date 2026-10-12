@@ -1,0 +1,2 @@
+(lang dune 3.0)
+(name llm_quest_ocaml)

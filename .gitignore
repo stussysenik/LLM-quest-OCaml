@@ -190,3 +190,18 @@ llm_quest/alignment/dpo/instruction-data-with-preference.json
 
 # diagrams
 *.mermaid
+
+### OCaml ###
+ocaml/_build/
+ocaml/test_all
+ocaml/demo
+ocaml/parity_check
+# NOTE: the Python stanza above ignores `lib/` (packaging); un-ignore ours
+!ocaml/lib/
+*.cmi
+*.cmo
+*.cmx
+*.cma
+*.cmxa
+*.o
+*.annot
