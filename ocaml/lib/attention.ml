@@ -105,32 +105,42 @@ let head_forward ~q:(qh : mat) ~k_all ~(v_all : mat) ~(attn_mask : bool array op
   let weights = softmax_rows scores in
   mat_mul weights v_all
 
-let mha_forward ?(attn_mask : bool array option = None) ?(kv : Kv_cache.layer_kv option = None)
-    (a : mha) (x : mat) : mat =
-  let s = Array.length x in
+(** Split stage: Q/K/V projections, split into per-head matrices.
+    Exposed so the KV-cache loop can capture the current K/V
+    (see [Block.block_forward_kv], [Gpt.prefill_cached]). *)
+let project_split (a : mha) (x : mat) : mat array * mat array * mat array =
   let q = linear_forward_batch a.w_q x in
   let k = linear_forward_batch a.w_k x in
   let v = linear_forward_batch a.w_v x in
-  let qh = split_heads q a.num_heads a.head_dim in
-  let kh = split_heads k a.num_heads a.head_dim in
-  let vh = split_heads v a.num_heads a.head_dim in
-  (* Prepend cache prefix if provided (inference with KV cache). *)
-  let kh_full =
-    match kv with
-    | None -> kh
-    | Some { keys; _ } -> Array.init a.num_heads (fun h -> Array.append keys.(h) kh.(h))
-  in
-  let vh_full =
-    match kv with
-    | None -> vh
-    | Some { values; _ } -> Array.init a.num_heads (fun h -> Array.append values.(h) vh.(h))
-  in
+  ( split_heads q a.num_heads a.head_dim,
+    split_heads k a.num_heads a.head_dim,
+    split_heads v a.num_heads a.head_dim )
+
+(** Prefix stage: prepend the cache-held K/V rows (if any) to the
+    current ones. Pure concatenation — no math. *)
+let with_prefix (a : mha) (kv : Kv_cache.layer_kv option) (kh : mat array) (vh : mat array) :
+    mat array * mat array =
+  match kv with
+  | None -> (kh, vh)
+  | Some { Kv_cache.keys; values } ->
+      ( Array.init a.num_heads (fun h -> Array.append keys.(h) kh.(h)),
+        Array.init a.num_heads (fun h -> Array.append values.(h) vh.(h)) )
+
+(** Combine stage: per-head causal+padding attention, merge, output
+    projection. *)
+let combine (a : mha) ?(attn_mask : bool array option = None) (qh : mat array) (kh_full : mat array)
+    (vh_full : mat array) : mat =
   let ctx =
-    Array.init a.num_heads (fun h -> head_forward ~q:qh.(h) ~k_all:kh_full.(h) ~v_all:vh_full.(h) ~attn_mask)
+    Array.init a.num_heads (fun h ->
+        head_forward ~q:qh.(h) ~k_all:kh_full.(h) ~v_all:vh_full.(h) ~attn_mask)
   in
-  let merged = merge_heads ctx in
-  ignore s;
-  linear_forward_batch a.out_proj merged
+  linear_forward_batch a.out_proj (merge_heads ctx)
+
+let mha_forward ?(attn_mask : bool array option = None) ?(kv : Kv_cache.layer_kv option = None)
+    (a : mha) (x : mat) : mat =
+  let qh, kh, vh = project_split a x in
+  let kh_full, vh_full = with_prefix a kv kh vh in
+  combine ~attn_mask a qh kh_full vh_full
 
 (** Teaching helper: unmasked single-head attention (v1/v2 behaviour). *)
 let single_head_no_mask ~w_q ~w_k ~w_v (x : mat) : mat =

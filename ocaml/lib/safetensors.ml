@@ -196,6 +196,25 @@ let mat_of (f : file) (name : string) : Tensor.mat =
 (** Row-major transpose on decode (for `nn.Linear`-style `(out, in)` weights). *)
 let mat_of_transposed (f : file) (name : string) : Tensor.mat = Tensor.transpose (mat_of f name)
 
+(** One head slice of a 3D [(heads, seq, dim)] tensor (e.g. exported
+    `past_key_values`: head [h] owns contiguous rows [h*seq, (h+1)*seq)
+    in row-major order). *)
+let mat_of_head (f : file) (name : string) ~(head : int) ~(heads : int) : Tensor.mat =
+  let e = find f name in
+  if e.dtype <> F32 then failwith ("Safetensors.mat_of_head: not F32: " ^ name);
+  let h, s, d =
+    match e.shape with
+    | [ h; s; d ] -> (h, s, d)
+    | _ -> failwith ("Safetensors.mat_of_head: not 3D: " ^ name)
+  in
+  if h <> heads || head < 0 || head >= h then failwith ("Safetensors.mat_of_head: bad head: " ^ name);
+  if e.off_end - e.off_start <> h * s * d * 4 then
+    failwith ("Safetensors.mat_of_head: size mismatch: " ^ name);
+  Array.init s (fun i ->
+      Array.init d (fun j ->
+          let o = e.off_start + (((head * s) + i) * d + j) * 4 in
+          Int32.float_of_bits (Bytes.get_int32_le f.data o)))
+
 let vec_of (f : file) (name : string) : Tensor.vec =
   let e = find f name in
   if e.dtype <> F32 then failwith ("Safetensors.vec_of: not F32: " ^ name);

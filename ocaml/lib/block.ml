@@ -46,13 +46,25 @@ let block_make (rs : Random.State.t) (cfg : Config.gpt_config) ?(activation = No
 let add_mat (a : mat) (b : mat) : mat =
   Array.mapi (fun i row -> Array.mapi (fun j v -> v +. b.(i).(j)) row) a
 
-let block_forward ?(attn_mask : bool array option = None) (blk : block) (x : mat) : mat =
+(** Block forward that also returns the CURRENT step's per-head K/V
+    (pre-prefix: exactly what the cache must store for this step).
+    With [kv=None] the trunk computes identically to [block_forward]
+    — same kernels, same order — so the plain forward delegates here
+    and parity keeps proving both. *)
+let block_forward_kv ?(attn_mask : bool array option = None) ?(kv : Kv_cache.layer_kv option = None)
+    (blk : block) (x : mat) : mat * Tensor.mat array * Tensor.mat array =
   let h1 = Norm.layernorm_forward blk.ln1 x in
-  let a = Attention.mha_forward ~attn_mask blk.att h1 in
+  let qh, kh, vh = Attention.project_split blk.att h1 in
+  let kh_full, vh_full = Attention.with_prefix blk.att kv kh vh in
+  let a = Attention.combine ~attn_mask blk.att qh kh_full vh_full in
   let h = add_mat x a in
   let h2 = Norm.layernorm_forward blk.ln2 h in
   let f = ffn_forward blk.ffn h2 in
-  add_mat h f
+  (add_mat h f, kh, vh)
+
+let block_forward ?(attn_mask : bool array option = None) (blk : block) (x : mat) : mat =
+  let out, _, _ = block_forward_kv ~attn_mask blk x in
+  out
 
 (** Batched block: per-item masks, shared verified kernel. *)
 let block_forward_batch ?(attn_mask : bool array array option = None) (blk : block) (xs : mat array) :

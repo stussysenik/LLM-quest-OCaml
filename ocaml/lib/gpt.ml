@@ -143,6 +143,21 @@ let forward_last_only_batch ?(attn_mask : bool array array option = None)
       lg.(idx))
     all_logits
 
+(** Full forward that also returns per-layer (K, V) head matrices — the
+    exact values a cache must hold after seeing [ids] (Gate K2). *)
+let forward_with_kv ?(attn_mask : bool array option = None) (m : t) (ids : int array) :
+    mat * (Tensor.mat array * Tensor.mat array) list =
+  let x = ref (embed m ids) in
+  let traces = ref [] in
+  List.iter
+    (fun blk ->
+      let out, kh, vh = Block.block_forward_kv ~attn_mask blk !x in
+      traces := (kh, vh) :: !traces;
+      x := out)
+    m.blocks;
+  let h = Norm.layernorm_forward m.final_ln !x in
+  (Attention.linear_forward_batch m.lm_head h, List.rev !traces)
+
 let num_parameters (m : t) : int =
   let mcount (a : mat) = Array.length a * if Array.length a = 0 then 0 else Array.length a.(0) in
   let lcount (l : Attention.linear) =
@@ -163,3 +178,92 @@ let num_parameters (m : t) : int =
       0 m.blocks
   + Array.length m.final_ln.Norm.scale * 2
   + lcount m.lm_head
+
+(* ------------------------------------------------------------------ *)
+(* KV-cache generation (ROADMAP step 5, Gates K1-K5).                   *)
+(* ------------------------------------------------------------------ *)
+
+(** Prefill: full forward over the prompt, pushing each layer's K/V into
+    [cache] (which must be fresh). Returns full logits; the last row
+    seeds the first decode step. *)
+let prefill_cached (m : t) (cache : Kv_cache.t) ?(attn_mask : bool array option = None)
+    (ids : int array) : mat =
+  if Kv_cache.past_len cache 0 <> 0 then invalid_arg "Gpt.prefill_cached: cache must be fresh";
+  let x = ref (embed m ids) in
+  List.iteri
+    (fun li blk ->
+      let kv = Kv_cache.peek cache li in
+      let out, kh, vh = Block.block_forward_kv ~attn_mask ~kv blk !x in
+      Kv_cache.push cache ~layer_idx:li ~keys:kh ~values:vh;
+      x := out)
+    m.blocks;
+  let h = Norm.layernorm_forward m.final_ln !x in
+  Attention.linear_forward_batch m.lm_head h
+
+(** One decode step: single token [tok] at absolute position [pos],
+    attending over the cache prefix plus itself.
+
+    Mask shape is [1, N+1] all-ones: every cached key is valid history
+    and the new key is the only new entry. The causal mask is implicit
+    in the cache here — recomputing a triangular mask would either drop
+    the prefix (wrong) or double-count the current token (wrong). *)
+let decode_step_cached (m : t) (cache : Kv_cache.t) (tok : int) (pos : int) : vec =
+  let x = ref (embed_with_pos m [| tok |] [| pos |]) in
+  List.iteri
+    (fun li blk ->
+      let kv = Kv_cache.peek cache li in
+      let mask = Array.make (Kv_cache.past_len cache li + 1) true in
+      let out, kh, vh = Block.block_forward_kv ~attn_mask:(Some mask) ~kv blk !x in
+      Kv_cache.push cache ~layer_idx:li ~keys:kh ~values:vh;
+      x := out)
+    m.blocks;
+  let h = Norm.layernorm_forward m.final_ln !x in
+  (Attention.linear_forward_batch m.lm_head h).(0)
+
+(** Greedy/tempered generation with KV cache (Gate K1): prefill once,
+    then one decode step per token. Must reproduce
+    [Sampling.generate_simple_loop] token-for-token. *)
+let generate_cached ?(top_k : int option = None) ?(top_p : float option = None)
+    ?(min_p : float option = None) ~(temp : float) (rs : Random.State.t) (m : t) (prompt : int array)
+    ~(max_gen : int) : int array =
+  let cache = Kv_cache.create ~num_layers:(List.length m.blocks) in
+  let logits = prefill_cached m cache prompt in
+  let ids = ref (Array.copy prompt) in
+  let last = ref logits.(Array.length logits - 1) in
+  for _ = 1 to max_gen do
+    let next = Sampling.sample ~top_k ~top_p ~min_p ~temp rs !last in
+    ids := Array.append !ids [| next |];
+    last := decode_step_cached m cache next (Array.length !ids - 1)
+  done;
+  !ids
+
+(** Batched cache generation (Gates K3-K5): one cache per item, one
+    batched step at a time. Positions are per-sequence counters
+    ([len_i - 1] after each append, Gate K5). Finished items (in
+    [eos_ids]) freeze: no sampling, no append, no cache push — so a
+    finished sequence can neither grow nor corrupt the others (Gate
+    K4). Without [eos_ids] every item runs the full [max_gen]. *)
+let generate_cached_batch ?(top_k : int option = None) ?(top_p : float option = None)
+    ?(min_p : float option = None) ?(eos_ids : int list option = None) ~(temp : float)
+    (rs : Random.State.t) (m : t) (prompts : int array array) ~(max_gen : int) : int array array =
+  let n = Array.length prompts in
+  let caches = Array.init n (fun _ -> Kv_cache.create ~num_layers:(List.length m.blocks)) in
+  let ids = ref (Array.map Array.copy prompts) in
+  let lasts = Array.init n (fun i -> (prefill_cached m caches.(i) prompts.(i)).(Array.length prompts.(i) - 1)) in
+  let finished = Array.make n false in
+  let is_eos tok = match eos_ids with None -> false | Some es -> List.mem tok es in
+  for _ = 1 to max_gen do
+    if Array.for_all (fun f -> f) finished then ()
+    else
+      for i = 0 to n - 1 do
+        if not finished.(i) then (
+          let next = Sampling.sample ~top_k ~top_p ~min_p ~temp rs lasts.(i) in
+          (* every sampled token — EOS included — is appended, matching
+             the repo's generate loops; only non-EOS tokens advance the
+             cache, so finished items freeze instead of corrupting. *)
+          ids := Array.mapi (fun j seq -> if j = i then Array.append seq [| next |] else seq) !ids;
+          if is_eos next then finished.(i) <- true
+          else lasts.(i) <- decode_step_cached m caches.(i) next (Array.length !ids.(i) - 1))
+      done
+  done;
+  !ids
