@@ -128,3 +128,32 @@ let generate_simple_loop ?(top_k : int option = None) ?(top_p : float option = N
     ids := Array.append !ids [| next |]
   done;
   !ids
+
+(** Batched generation (Gate 5): one [model_forward_batch] call per step
+    over per-item context windows, then per-item sampling and append.
+    With batch=1 this must reproduce [generate_simple_loop] token for
+    token — catching position/mask off-by-ones invisible to a single
+    forward pass. *)
+let generate_simple_loop_batched ?(top_k : int option = None) ?(top_p : float option = None)
+    ?(min_p : float option = None) ~(temp : float) (rs : Random.State.t)
+    ~(model_forward_batch : int array array -> mat array) ~(context_length : int)
+    (prompts : int array array) ~(max_gen : int) : int array array =
+  let ids = ref (Array.map Array.copy prompts) in
+  for _ = 1 to max_gen do
+    let windows =
+      Array.map
+        (fun seq ->
+          let s = Array.length seq in
+          let start = max 0 (s - context_length) in
+          Array.init (s - start) (fun i -> seq.(start + i)))
+        !ids
+    in
+    let all_logits = model_forward_batch windows in
+    let next =
+      Array.mapi
+        (fun _ lg -> sample ~top_k ~top_p ~min_p ~temp rs lg.(Array.length lg - 1))
+        all_logits
+    in
+    ids := Array.mapi (fun i seq -> Array.append seq [| next.(i) |]) !ids
+  done;
+  !ids

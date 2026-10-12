@@ -142,3 +142,15 @@ let single_head_no_mask ~w_q ~w_k ~w_v (x : mat) : mat =
   let scores = mat_mul q (transpose k) in
   Array.iter (fun row -> Array.iteri (fun j s -> row.(j) <- s *. scale) row) scores;
   mat_mul (softmax_rows scores) v
+
+(** Batched MHA (parity Gate 1-2): item [i] runs the verified
+    [mha_forward] with causal + padding mask [attn_mask.(i)]
+    ([true] = real token). Padding keys are hidden; causal structure
+    within the real tokens is unchanged (Gate 3 pins this). *)
+let mha_forward_batch ?(attn_mask : bool array array option = None) (a : mha) (xs : mat array) :
+    mat array =
+  Array.mapi
+    (fun i x ->
+      let m = match attn_mask with None -> None | Some ms -> Some ms.(i) in
+      mha_forward ~attn_mask:m a x)
+    xs

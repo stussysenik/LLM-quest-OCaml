@@ -27,10 +27,10 @@ These tests prove **self-consistency only** — not parity with PyTorch.
 
 | # | Step | Verification gate |
 |---|------|-------------------|
-| 1 | **Weight loader (safetensors)** — minimal F32/I64 parser in stdlib OCaml, HF `gpt2` naming map (`transformer.h.N.*`, transposed Conv1D, `lm_head` transpose) | Embeddings match PyTorch to ~1e-6 |
-| 2 | **Intermediate activation parity** — expose per-block hidden states (`output_hidden_states=True` gives 13 checkpoints) | Block outputs match to ~1e-5 |
-| 3 | **Final logits parity** — single-sequence forward on loaded weights | Logits match to ~1e-4 (fp32 accumulation over 12 layers) |
-| 4 | **Batched forward** — add batch dim to tensor ops | batch=1 == single-sequence; batch=N repeats == N identical outputs |
+| 1 | **Weight loader (safetensors)** — minimal F32/I64 parser in stdlib OCaml, HF `gpt2` naming map (`transformer.h.N.*`, transposed Conv1D, `lm_head` transpose) | ✅ Embeddings match PyTorch to ~1e-6 |
+| 2 | **Intermediate activation parity** — expose per-block hidden states (`output_hidden_states=True` gives 13 checkpoints) | ✅ Block outputs match to ~1e-7 rel (dual abs+rel gates) |
+| 3 | **Final logits parity** — single-sequence forward on loaded weights | ✅ Logits match to ~5e-5 |
+| 4 | **Batched forward** — batch dim over shared single-sequence kernels | 🔄 batch=1 ≡ single; repeats identical; padding+positions; per-sequence last-token; greedy decode parity |
 | 5 | **KV-cache generation loop** — `generate_loop_kv_cache` | Greedy decode **identical** with and without cache (catches off-by-one in mask/positions) |
 | 6 | **Checkpoint loader + real text** — GPT-2 checkpoint format end to end | Token-by-token match with HuggingFace generation |
 

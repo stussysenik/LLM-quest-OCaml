@@ -53,3 +53,12 @@ let block_forward ?(attn_mask : bool array option = None) (blk : block) (x : mat
   let h2 = Norm.layernorm_forward blk.ln2 h in
   let f = ffn_forward blk.ffn h2 in
   add_mat h f
+
+(** Batched block: per-item masks, shared verified kernel. *)
+let block_forward_batch ?(attn_mask : bool array array option = None) (blk : block) (xs : mat array) :
+    mat array =
+  Array.mapi
+    (fun i x ->
+      let m = match attn_mask with None -> None | Some ms -> Some ms.(i) in
+      block_forward ~attn_mask:m blk x)
+    xs

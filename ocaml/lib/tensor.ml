@@ -135,3 +135,18 @@ let multinomial (rs : Random.State.t) (p : vec) : int =
     incr i
   done;
   !i
+
+(** Batched sequences: one [(s x d)] token matrix per item. Items in a
+    batch share a physical length (shorter ones are padded); see
+    [Gpt.forward_batch] for masks and positions.
+
+    Deliberate design: batched ops delegate item-wise to the verified
+    single-sequence kernels above. Batching is wiring (padding,
+    per-sequence positions, per-sequence readout) — never new math —
+    so Gate 1 (batch=1 ≡ single path) holds by construction and the
+    gates that bite are 3-5. *)
+type bmat = mat array
+
+let bmat_map (f : mat -> mat) (b : bmat) : bmat = Array.map f b
+
+let bmat_mapi (f : int -> mat -> mat) (b : bmat) : bmat = Array.mapi f b

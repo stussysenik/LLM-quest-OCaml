@@ -31,25 +31,60 @@ let make (rs : Random.State.t) (cfg : Config.gpt_config) ?(activation = Norm.Gel
     cfg;
   }
 
-let embed (m : t) (ids : int array) : mat =
+let embed_with_pos (m : t) (ids : int array) (pos : int array) : mat =
   let s = Array.length ids in
+  if s > m.cfg.context_length then invalid_arg "Gpt.embed: sequence exceeds context_length";
+  if Array.length pos <> s then invalid_arg "Gpt.embed: pos_ids length mismatch";
   Array.init s (fun i ->
-      if ids.(i) < 0 || ids.(i) >= m.cfg.vocab_size then
-        invalid_arg "Gpt.embed: token id out of range";
+      if ids.(i) < 0 || ids.(i) >= m.cfg.vocab_size then invalid_arg "Gpt.embed: token id out of range";
+      if pos.(i) < 0 || pos.(i) >= m.cfg.context_length then
+        invalid_arg "Gpt.embed: position id out of range";
       let te = Array.copy m.tok_emb.(ids.(i)) in
-      let pe = m.pos_emb.(i) in
+      let pe = m.pos_emb.(pos.(i)) in
       for j = 0 to m.cfg.emb_dim - 1 do
         te.(j) <- te.(j) +. pe.(j)
       done;
       te)
 
-let forward ?(attn_mask : bool array option = None) (m : t) (ids : int array) : mat =
-  let s = Array.length ids in
-  if s > m.cfg.context_length then invalid_arg "Gpt.forward: sequence exceeds context_length";
-  let x = ref (embed m ids) in
+let embed (m : t) (ids : int array) : mat =
+  embed_with_pos m ids (Array.init (Array.length ids) (fun j -> j))
+
+(** Position ids per item: [pos_ids.(i).(j)] is the positional-embedding
+    row for physical row [j] of item [i]. Default (None) is identity —
+    correct for unpadded and right-padded batches, where physical and
+    real positions coincide. Left-padded items pass HF-style ids
+    (pads → 0, real tokens counted from 0), so every sequence's first
+    real token starts at position 0 (Gate 3). *)
+let embed_batch ?(pos_ids : int array array option = None) (m : t) (bids : int array array) : mat array
+    =
+  Array.mapi
+    (fun i ids ->
+      let pos =
+        match pos_ids with None -> Array.init (Array.length ids) (fun j -> j) | Some ps -> ps.(i)
+      in
+      embed_with_pos m ids pos)
+    bids
+
+let mask_of_batch (attn_mask : bool array array option) (i : int) : bool array option =
+  match attn_mask with None -> None | Some ms -> Some ms.(i)
+
+(** Shared trunk: blocks + final LN + head, on pre-embedded input. *)
+let forward_from_emb ?(attn_mask : bool array option = None) (m : t) (emb : mat) : mat =
+  let x = ref emb in
   List.iter (fun blk -> x := Block.block_forward ~attn_mask blk !x) m.blocks;
   let h = Norm.layernorm_forward m.final_ln !x in
   Attention.linear_forward_batch m.lm_head h
+
+let forward ?(attn_mask : bool array option = None) (m : t) (ids : int array) : mat =
+  forward_from_emb ~attn_mask m (embed m ids)
+
+(** Batched forward (Gates 1-3): one trunk run per item with its own
+    padding mask. Causal + padding masks compose inside [mha_forward];
+    neither replaces the other. *)
+let forward_batch ?(attn_mask : bool array array option = None) ?(pos_ids : int array array option = None)
+    (m : t) (bids : int array array) : mat array =
+  let embs = embed_batch ~pos_ids m bids in
+  Array.mapi (fun i e -> forward_from_emb ~attn_mask:(mask_of_batch attn_mask i) m e) embs
 
 (** Per-stage hidden states: [embeddings; block_0; ...; block_{L-1}].
     Mirrors HF `output_hidden_states=True` (13 entries for gpt2):
@@ -81,6 +116,32 @@ let forward_last_only ?(attn_mask : bool array option = None) (m : t) (ids : int
         !last
   in
   logits.(idx)
+
+(** Last real-token index of a padding mask ([-1] if empty). *)
+let last_real_index (mk : bool array) : int =
+  let last = ref (-1) in
+  Array.iteri (fun i real -> if real then last := i) mk;
+  !last
+
+(** Batched last-token readout (Gate 4): logits at [len_i - 1] per item,
+    NOT at the physical last position. Reading [:, -1, :] on a padded
+    batch silently returns pad-row logits for short sequences — the
+    single most likely batching bug, pinned by gate 4. *)
+let forward_last_only_batch ?(attn_mask : bool array array option = None)
+    ?(pos_ids : int array array option = None) (m : t) (bids : int array array) : vec array =
+  let all_logits = forward_batch ~attn_mask ~pos_ids m bids in
+  Array.mapi
+    (fun i lg ->
+      let idx =
+        match attn_mask with
+        | None -> Array.length bids.(i) - 1
+        | Some ms -> (
+            match last_real_index ms.(i) with
+            | -1 -> invalid_arg "Gpt.forward_last_only_batch: empty mask"
+            | k -> k)
+      in
+      lg.(idx))
+    all_logits
 
 let num_parameters (m : t) : int =
   let mcount (a : mat) = Array.length a * if Array.length a = 0 then 0 else Array.length a.(0) in
