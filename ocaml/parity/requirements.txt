@@ -3,12 +3,25 @@
 # stack. Bumping any of these invalidates every reference and requires
 # re-exporting all of them together.
 #
-#   python -m venv <env> && <env>/bin/pip install -r ocaml/parity/requirements.txt
-#   <env>/bin/python ocaml/parity/export_reference.py /data/tmp/ocaml-parity/gpt2_ref.safetensors
+# torch is installed in a SEPARATE step, from the CPU index only, and
+# deliberately not from this file: `--index-url` inside a requirements
+# file is a *global* option, so putting the CPU index here would send
+# transformers and safetensors to download.pytorch.org too (they are not
+# there), and leaving it off — the previous version — let PyPI serve the
+# CUDA build. A CUDA torch on a CPU box and a CPU torch run different
+# kernels in different reduction orders, so a reference exported on one
+# and gated against the other is not a comparison, it is a coincidence.
+# `parity/pinned.py` refuses to export unless `torch.__version__` is the
+# pinned `2.14.1+cpu`, so skipping this step fails loudly rather than
+# silently producing a mismatched reference.
+#
+#   python -m venv <env>
+#   <env>/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.1
+#   <env>/bin/pip install -r ocaml/parity/requirements.txt
+#   <env>/bin/python ocaml/parity/export_reference.py --family gpt2  /data/tmp/ocaml-parity/gpt2_ref.safetensors
+#   <env>/bin/python ocaml/parity/export_reference.py --family llama /data/tmp/ocaml-parity/llama_ref.safetensors
 #   <env>/bin/python ocaml/parity/export_kv.py       /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
 #   <env>/bin/python ocaml/parity/export_gen.py      /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
 #
-# torch is pinned to the CPU build because that is what generated the refs.
-torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
 transformers==5.19.0
 safetensors==0.8.0

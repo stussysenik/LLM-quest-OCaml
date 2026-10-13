@@ -178,6 +178,38 @@ let find (f : file) (name : string) : entry =
 
 let names (f : file) : string list = List.map fst f.entries
 
+let shape_str (s : int list) : string = "[" ^ String.concat ";" (List.map string_of_int s) ^ "]"
+
+(** A tensor this loader must NOT find. Llama has no biases anywhere and
+    no learned positions; a GPT-2-shaped loader that simply stops asking
+    for [*.bias] reads a Llama file "successfully" and leaves every
+    projection un-biased by luck rather than by check. *)
+let require_absent (f : file) (name : string) : unit =
+  if List.mem_assoc name f.entries then
+    failwith (Printf.sprintf "Safetensors: unexpected tensor %s" name)
+
+(** Every tensor in the file must be claimed, and every claimed tensor
+    must exist. [skip_prefix] covers the [ref.*] namespace: the parity
+    harness keeps weights and reference activations in one file, and the
+    reference is not the loader's business. Everything else must match
+    [expected] exactly — so a GPT-2 file handed to the Llama loader
+    fails here naming the first unexpected key, which is the right way
+    to find out. *)
+let assert_exact_keys (f : file) ~(skip_prefix : string) (expected : string list) : unit =
+  let claimed = List.sort_uniq compare expected in
+  let present =
+    List.sort_uniq compare (List.filter (fun k -> not (String.starts_with ~prefix:skip_prefix k)) (names f))
+  in
+  let missing = List.filter (fun k -> not (List.mem k present)) claimed in
+  let unexpected = List.filter (fun k -> not (List.mem k claimed)) present in
+  match (missing, unexpected) with
+  | [], [] -> ()
+  | _ ->
+      failwith
+        (Printf.sprintf "Safetensors: file does not match the loader's key set — missing: [%s], unexpected: [%s]"
+           (String.concat "; " missing)
+           (String.concat "; " unexpected))
+
 let mat_of (f : file) (name : string) : Tensor.mat =
   let e = find f name in
   if e.dtype <> F32 then failwith ("Safetensors.mat_of: not F32: " ^ name);
@@ -192,9 +224,6 @@ let mat_of (f : file) (name : string) : Tensor.mat =
       Array.init cols (fun j ->
           let o = e.off_start + ((i * cols) + j) * 4 in
           Int32.float_of_bits (Bytes.get_int32_le f.data o)))
-
-(** Row-major transpose on decode (for `nn.Linear`-style `(out, in)` weights). *)
-let mat_of_transposed (f : file) (name : string) : Tensor.mat = Tensor.transpose (mat_of f name)
 
 (** One head slice of a 3D [(heads, seq, dim)] tensor (e.g. exported
     `past_key_values`: head [h] owns contiguous rows [h*seq, (h+1)*seq)
@@ -224,6 +253,33 @@ let vec_of (f : file) (name : string) : Tensor.vec =
   if e.off_end - e.off_start <> n * 4 then failwith ("Safetensors.vec_of: size mismatch: " ^ name);
   Array.init n (fun i ->
       Int32.float_of_bits (Bytes.get_int32_le f.data (e.off_start + (i * 4))))
+
+(** Read a tensor, asserting the shape it *must* have.
+
+    Every loader goes through this, and the expectation always comes
+    from [Config] — never from the file. That is the whole point: a
+    transposed `nn.Linear` weight has a square shape for
+    [o_proj]/[q_proj] and loads silently, producing wrong numbers with
+    no error anywhere; only an expected shape catches it. The message
+    names the tensor, so a config/file mismatch is identifiable without
+    a debugger. *)
+let get_tensor (f : file) (name : string) ~(expected_shape : int list) : Tensor.mat =
+  let e = find f name in
+  if e.shape <> expected_shape then
+    failwith
+      (Printf.sprintf "Safetensors: %s has shape %s, expected %s" name (shape_str e.shape)
+         (shape_str expected_shape));
+  mat_of f name
+
+(** 1D twin of [get_tensor] — Llama's norms are bare weight vectors with
+    no bias, and GPT-2's LayerNorms are scale + shift. *)
+let get_vector (f : file) (name : string) ~(expected_len : int) : Tensor.vec =
+  let e = find f name in
+  if e.shape <> [ expected_len ] then
+    failwith
+      (Printf.sprintf "Safetensors: %s has shape %s, expected [%d]" name (shape_str e.shape)
+         expected_len);
+  vec_of f name
 
 let i64_array_of (f : file) (name : string) : int64 array =
   let e = find f name in

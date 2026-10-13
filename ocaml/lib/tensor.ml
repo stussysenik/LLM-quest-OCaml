@@ -69,15 +69,29 @@ let rowvec_mul (x : vec) (w : mat) : vec =
       done;
       !s)
 
-(** Batch linear: each row of [x (s x d_in)] @ [w (d_in x d_out)] + [b]. *)
-let linear_batch (x : mat) (w : mat) (b : vec option) : mat =
-  let y = mat_mul x w in
+(** [linear_fwd (w (d_out x d_in)) (x (s x d_in)) (b : vec option)] =
+    [x @ w^T + b] — the one linear op in this repo.
+
+    **[w] is [(out, in)]**, [nn.Linear]'s own layout, which is what HF
+    stores on disk for every plain linear here; GPT-2's [Conv1D] is
+    [(in, out)] and is transposed once, at load, by
+    [Gpt2_loader]. One convention means no call site chooses.
+
+    The dangerous case is the square one: for GPT-2 and for
+    tiny-random-Llama, [hidden = heads * head_dim], so every attention
+    projection is square and a transposed weight multiplies to *numbers*
+    rather than raising. [mat_mul]'s inner-dimension check catches every
+    non-square projection; the square ones are covered by the layout gate
+    ([layout_gpt2_out_in] / [layout_llama_out_in]), which re-derives the
+    expected [out] from the config instead of trusting the loader. *)
+let linear_fwd (w : mat) (x : mat) (b : vec option) : mat =
+  let y = mat_mul x (transpose w) in
   (match b with
   | None -> ()
   | Some bv ->
       let s = Array.length y in
       let d = if s = 0 then 0 else Array.length y.(0) in
-      if Array.length bv <> d then invalid_arg "Tensor.linear_batch: bias dim mismatch";
+      if Array.length bv <> d then invalid_arg "Tensor.linear_fwd: bias dim mismatch";
       for i = 0 to s - 1 do
         for j = 0 to d - 1 do
           y.(i).(j) <- y.(i).(j) +. bv.(j)

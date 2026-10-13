@@ -43,8 +43,9 @@ it with the next. `make ci` stays green after every row.
 | Step | Delta | Gate |
 | :--- | :--- | :--- |
 | A | `config.ml` → one `t` for both families, family detail behind `arch`, accessors (`max_positions`, `norm_eps`, `ffn_inner`, `kv_heads`, `head_dim`, `has_learned_positions`) | ✅ GPT-2 parity **bit-identical** (every `max_abs_diff` unchanged to the digit); 15 config gates |
-| B | `test/parity.ml` → parameterized; export scripts family-tagged | export + parity green for GPT-2 via the new path |
-| C | `hf_loader.ml` split → `gpt2_loader.ml` + `llama_loader.ml` (`safetensors.ml` stays shared) | GPT-2 parity green via the new loader |
+| B | `test/parity.ml` → parameterized (`run ~family`, family-erased `runnable`); `export_reference.py --family {gpt2,llama}` | ✅ B1 GPT-2 parity **bit-identical** through the new path; B2 `make ci` gate count unchanged, 101.9s → measured; B3 `--family llama` export runs, prints the `hidden_states[-1]` convention + `tie_word_embeddings`; B4 `run`'s body has no family branch |
+| C | `hf_loader.ml` split → `gpt2_loader.ml` + `llama_loader.ml` + `llama.ml` (`safetensors.ml` stays shared, gains `get_tensor`/`require_absent`/`assert_exact_keys`) | ✅ C1 key set + every shape match the config; C2 loaded params == file's 1032272; C3 three wrong-config variants each raise naming the tensor; C4 (15 gates total) tie aliases (physically, `==`) / untied-without-head raises / tie-with-head raises; C5 `--family llama` loads weights then stops at step D; GPT-2 parity **bit-identical** through the rewritten loader |
+| L | **Weight layout → `[out, in]` project-wide.** `Attention.linear.w` becomes `(out, in)`; `Tensor.linear_fwd` is the one linear op and has no layout parameter; `Gpt2_loader` transposes `Conv1D` from `(in, out)` at load; `Llama_loader` unchanged (already `nn.Linear` order) | ✅ GPT-2 parity **bit-identical** — every `max_abs_diff` unchanged to the digit, which is the proof the refactor computes the same function; from-scratch weights *and* logits bit-identical as well; new gate `layout_gpt2_out_in` / `layout_llama_out_in` re-derives each `out` from the config, covering the square projections shape assertions cannot |
 | D1 | RMSNorm | vs `LlamaRMSNorm` on random input (1e-6, tiny + `hidden=2048`); eps-inside-sqrt; differential vs GPT-2 LayerNorm (no mean subtraction, no bias) |
 | D2 | SwiGLU | vs `LlamaMLP`: `down(silu(gate(x)) * up(x))`, width = `intermediate_size` |
 | D3 | RoPE, base | relative-position invariance `q·k(i,j) == q·k(i+d,j+d)`; direct vs `apply_rotary_pos_emb`; cached-at-pos-p ≡ full-forward row p |
@@ -72,11 +73,53 @@ separate `make ci-llama` target rather than the main `make ci`.
 
 ## Notes
 
+### Reference files
+
+| File | Family | Exported by |
+| :--- | :--- | :--- |
+| `/data/tmp/ocaml-parity/gpt2_ref.safetensors` | gpt2 (652MB, real weights) | `parity/export_reference.py --family gpt2` |
+| `/data/tmp/ocaml-parity/gpt2_kv_ref.safetensors` | gpt2 | `parity/export_kv.py` |
+| `/data/tmp/ocaml-parity/gpt2_gen_ref.safetensors` | gpt2 | `parity/export_gen.py` |
+| `/data/tmp/ocaml-parity/llama_ref.safetensors` | llama (`hf-internal-testing/tiny-random-LlamaForCausalLM`, ~5MB) | `parity/export_reference.py --family llama` |
+| `/data/tmp/ocaml-parity/llama_tied_ref.safetensors` | llama, head tied (same weights, no `lm_head.weight`) | `parity/export_reference.py --family llama --drop-head` |
+
+- `parity/requirements.txt` installs torch **separately**, from the
+  CPU index only. `--index-url` inside a requirements file is a global
+  option, so the old one-line form could not work; and leaving it off
+  let PyPI serve the CUDA build. `pinned.py` now enforces
+  `torch.__version__ == "2.14.1+cpu"` as well as the transformers pin —
+  a CUDA torch reduces in a different order, so a reference exported on
+  one and gated against the other looks like a numerical disagreement
+  that is really an environment mismatch.
+- **Weight layout is `[out, in]`, project-wide.** Every matrix a loader
+  hands the kernels has its output features as *rows*, matching
+  `nn.Linear` and `Tensor.linear_fwd w x = x @ w^T`. It is that way
+  because it is the layout most of the world already stores: the Llama
+  loader is a pure read, and the GPT-2 loader converts HF's `Conv1D`
+  from `(in, out)` at load. The alternative — one convention per family —
+  means every call site in the attention and MLP code picks, and a wrong
+  pick is silent: for both `gpt2` and tiny-random-Llama,
+  `hidden = heads * head_dim`, so every attention projection is square
+  and a transposed weight multiplies to plausible numbers.
+  `mat_mul`'s inner-dimension check catches the non-square cases; the
+  square ones are the job of the layout gate (`layout_gpt2_out_in`,
+  `layout_llama_out_in`), which re-derives each matrix's expected `out`
+  from the config *independently* of the loader's own `~expected_shape`.
+- `embed_tokens` and a tied `lm_head` are `[vocab, hidden]` — the
+  embedding table's own layout, which coincides with `[out, in]` for the
+  head. Tying therefore needs no transpose, and C4a pins that the tied
+  head *is* the embedding matrix rather than a copy or its transpose.
+- `tiny-random-LlamaForCausalLM` has `num_key_value_heads ==
+  num_attention_heads` (4/4) — **no GQA**. Step E therefore does not
+  cover GQA; `Config.llama_tiny_test_config` (4 heads / 2 kv heads)
+  and step D5 do. Do not read a green E as a green GQA.
+
 - HF `gpt2` uses `gelu_new` (tanh approx), the repo uses exact-erf GELU.
   The loader must select the matching activation or parity will fail at
   every block past the first FFN.
-- HF `Conv1D` weights are stored `(in, out)` — no transpose needed.
-  `lm_head` (`nn.Linear`) is stored `(out, in)` — transpose needed.
+- HF `Conv1D` weights are stored `(in, out)` and are **transposed** at
+  load into the project convention `(out, in)`. `lm_head` (`nn.Linear`)
+  is stored `(out, in)` already and is read as-is.
 - Reference export script lives in `ocaml/parity/` (Python side, needs
   torch+transformers, CPU is fine). `parity/requirements.txt` pins the
   stack (`transformers==5.19.0`, `torch==2.14.1+cpu`,

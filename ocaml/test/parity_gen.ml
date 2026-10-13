@@ -101,7 +101,7 @@ let () =
   if Array.length Sys.argv <> 3 then (
     Printf.eprintf "usage: %s <weights.safetensors> <gen_ref.safetensors>\n" Sys.argv.(0);
     exit 2);
-  let model = Hf_loader.load_gpt2 Sys.argv.(1) in
+  let model = Gpt2_loader.load (Safetensors.open_file Sys.argv.(1)) Config.gpt_config_124m in
   let genf = Safetensors.open_file Sys.argv.(2) in
   let prompt = i64_ints genf "gen.prompt_ids" in
   let new_ids = i64_ints genf "gen.new_ids" in

@@ -25,7 +25,7 @@ let () =
   if Array.length Sys.argv <> 3 then (
     Printf.eprintf "usage: %s <weights.safetensors> <kv_ref.safetensors>\n" Sys.argv.(0);
     exit 2);
-  let model = Hf_loader.load_gpt2 Sys.argv.(1) in
+  let model = Gpt2_loader.load (Safetensors.open_file Sys.argv.(1)) Config.gpt_config_124m in
   let n_layers = List.length model.Gpt.blocks in
   let n_heads = model.Gpt.cfg.Config.num_heads in
   let kvf = Safetensors.open_file Sys.argv.(2) in

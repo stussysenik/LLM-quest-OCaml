@@ -14,18 +14,28 @@
 
 open Tensor
 
+(** A linear layer's weights. [w] is **[(out, in)]** — [d_out] rows,
+    [d_in] columns — matching [Tensor.linear_fwd] and [nn.Linear]. See
+    that function for why the square-projection case needs a gate and
+    not just a type. *)
 type linear = { w : mat; b : vec option; d_in : int; d_out : int }
 
 let linear_make (rs : Random.State.t) d_in d_out ~bias : linear =
-  (* GPT-2 style init: N(0, 0.02); matches the "from scratch" training path. *)
+  (* GPT-2 style init: N(0, 0.02); matches the "from scratch" training path.
+     Drawn as [(in, out)] then transposed rather than drawn as
+     [(out, in)] directly: transpose only permutes the floats, so every
+     from-scratch model keeps the exact numbers it had before the
+     layout convention changed. That leaves the convention refactor with
+     a total "nothing moved" result instead of "only the loaded-weights
+     parity stayed put". *)
   let w =
     let m = randn_mat rs d_in d_out in
-    Array.map (Array.map (fun v -> v *. 0.02)) m
+    Array.map (Array.map (fun v -> v *. 0.02)) m |> Tensor.transpose
   in
   let b = if bias then Some (zeros_vec d_out) else None in
   { w; b; d_in; d_out }
 
-let linear_forward_batch (l : linear) (x : mat) : mat = linear_batch x l.w l.b
+let linear_forward_batch (l : linear) (x : mat) : mat = linear_fwd l.w x l.b
 
 type mha = {
   w_q : linear;

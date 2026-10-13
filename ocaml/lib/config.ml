@@ -187,9 +187,11 @@ let gpt_tiny_test_config =
 (* ------------------------------------------------------------------ *)
 
 (** Tiny Llama for the architecture gates (RMSNorm/SwiGLU/RoPE/GQA) and
-    the tiny-random parity run. GQA on purpose: [kv_heads < num_heads]
-    is the configuration that catches head-grouping bugs, and a tiny
-    config with no GQA would not exercise them. *)
+    the from-scratch tests. GQA on purpose: [kv_heads < num_heads] is
+    the configuration that catches head-grouping bugs, and a tiny config
+    with no GQA would not exercise them.
+
+    Not the tiny-random checkpoint — see [llama_tiny_random_config]. *)
 let llama_tiny_test_config =
   {
     vocab_size = 64;
@@ -203,6 +205,56 @@ let llama_tiny_test_config =
           intermediate_size = 128;
           max_position_embeddings = 16;
           rms_norm_eps = 1e-5;
+          rope_theta = 10000.0;
+          rope_scaling = None;
+          tie_word_embeddings = true;
+        };
+  }
+
+(** Mirrors [hf-internal-testing/tiny-random-LlamaForCausalLM] exactly —
+    the checkpoint [Llama_loader] is gated against in steps C and E.
+
+    Two Llama configs, not one, and the difference is load-bearing:
+    this one has [num_key_value_heads = num_attention_heads] (4/4), so
+    it has **no GQA**. The checkpoint is a published artifact and cannot
+    be asked for GQA, so steps C and E verify layout, transpose and
+    convention, while GQA lives in [llama_tiny_test_config] and step
+    D5. A green step E is not a green GQA — see ROADMAP.md. *)
+let llama_tiny_random_config =
+  {
+    vocab_size = 32000;
+    hidden_size = 16;
+    num_layers = 2;
+    num_heads = 4;
+    arch =
+      Llama
+        {
+          num_key_value_heads = 4;
+          intermediate_size = 64;
+          max_position_embeddings = 2048;
+          rms_norm_eps = 1e-6;
+          rope_theta = 10000.0;
+          rope_scaling = None;
+          tie_word_embeddings = false;
+        };
+  }
+
+(** The same checkpoint with the head tied to the embedding matrix.
+    Not a synthetic variant: this is what gate C4 loads, and it is also
+    the shape a real tied Llama takes (HF's safetensors save omits
+    [lm_head.weight] entirely when the two share storage), so the
+    aliasing path is exercised against a file that looks like a real
+    one rather than a hand-made fixture. *)
+let llama_tiny_random_tied_config =
+  {
+    llama_tiny_random_config with
+    arch =
+      Llama
+        {
+          num_key_value_heads = 4;
+          intermediate_size = 64;
+          max_position_embeddings = 2048;
+          rms_norm_eps = 1e-6;
           rope_theta = 10000.0;
           rope_scaling = None;
           tie_word_embeddings = true;
