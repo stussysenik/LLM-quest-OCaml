@@ -10,6 +10,9 @@ Writes ONE safetensors file containing:
 
 Usage:
     python ocaml/parity/export_reference.py /data/tmp/ocaml-parity/gpt2_ref.safetensors
+
+Pinned stack: see parity/requirements.txt + parity/pinned.py. Re-export
+this file together with the kv/gen references whenever the pin moves.
 """
 
 import sys
@@ -18,13 +21,18 @@ import torch
 from safetensors.torch import save_file
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
+import pinned
+
+pinned.check_pinned()
+
 
 def main(out_path, prompt="Hello world"):
-    model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
+    model = GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
     print(f"activation: {model.config.activation_function}")
-    tok = GPT2Tokenizer.from_pretrained("gpt2")
+    tok = GPT2Tokenizer.from_pretrained("gpt2", revision=pinned.GPT2_REVISION)
     ids = tok(prompt, return_tensors="pt").input_ids
     print(f"prompt {prompt!r} -> ids {ids[0].tolist()}")
+    print(pinned.banner())
 
     with torch.no_grad():
         out = model(ids, output_hidden_states=True)

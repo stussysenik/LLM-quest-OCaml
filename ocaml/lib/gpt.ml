@@ -222,18 +222,27 @@ let decode_step_cached (m : t) (cache : Kv_cache.t) (tok : int) (pos : int) : ve
 
 (** Greedy/tempered generation with KV cache (Gate K1): prefill once,
     then one decode step per token. Must reproduce
-    [Sampling.generate_simple_loop] token-for-token. *)
+    [Sampling.generate_simple_loop] token-for-token.
+
+    [eos_ids] matches HF's [generate] stop contract: the stopping token
+    is appended to the output and the loop ends — no decode past it, no
+    cache push for it. It is a single-sequence mirror of the frozen-item
+    rule in [generate_cached_batch]. *)
 let generate_cached ?(top_k : int option = None) ?(top_p : float option = None)
-    ?(min_p : float option = None) ~(temp : float) (rs : Random.State.t) (m : t) (prompt : int array)
-    ~(max_gen : int) : int array =
+    ?(min_p : float option = None) ?(eos_ids : int list option = None) ~(temp : float)
+    (rs : Random.State.t) (m : t) (prompt : int array) ~(max_gen : int) : int array =
+  let is_eos tok = match eos_ids with None -> false | Some es -> List.mem tok es in
   let cache = Kv_cache.create ~num_layers:(List.length m.blocks) in
   let logits = prefill_cached m cache prompt in
   let ids = ref (Array.copy prompt) in
   let last = ref logits.(Array.length logits - 1) in
-  for _ = 1 to max_gen do
+  let finished = ref false in
+  let step = ref 0 in
+  while !step < max_gen && not !finished do
     let next = Sampling.sample ~top_k ~top_p ~min_p ~temp rs !last in
     ids := Array.append !ids [| next |];
-    last := decode_step_cached m cache next (Array.length !ids - 1)
+    incr step;
+    if is_eos next then finished := true else last := decode_step_cached m cache next (Array.length !ids - 1)
   done;
   !ids
 

@@ -112,20 +112,29 @@ let sample ?(top_k : int option = None) ?(top_p : float option = None) ?(min_p :
 
 (** Mirrors [generate_simple_loop]: repeatedly take the last-position
     logits, sample one token, append. [model_forward] is any
-    [ids -> logits (seq x vocab)] function (e.g. [Gpt.forward]). *)
+    [ids -> logits (seq x vocab)] function (e.g. [Gpt.forward]).
+
+    [eos_ids] pins HF's stop semantics: a stopping token is **appended**
+    and then generation ends — [generate] returns prompt + k tokens with
+    the EOS included, and does not decode past it. *)
 let generate_simple_loop ?(top_k : int option = None) ?(top_p : float option = None)
-    ?(min_p : float option = None) ~(temp : float) (rs : Random.State.t)
+    ?(min_p : float option = None) ?(eos_ids : int list option = None) ~(temp : float) (rs : Random.State.t)
     ~(model_forward : int array -> mat) ~(context_length : int) (prompt : int array) ~(max_gen : int) :
     int array =
+  let is_eos tok = match eos_ids with None -> false | Some es -> List.mem tok es in
   let ids = ref (Array.copy prompt) in
-  for _ = 1 to max_gen do
+  let finished = ref false in
+  let step = ref 0 in
+  while !step < max_gen && not !finished do
     let s = Array.length !ids in
     let start = max 0 (s - context_length) in
     let window = Array.init (s - start) (fun i -> !ids.(start + i)) in
     let logits = model_forward window in
     let last = logits.(Array.length logits - 1) in
     let next = sample ~top_k ~top_p ~min_p ~temp rs last in
-    ids := Array.append !ids [| next |]
+    ids := Array.append !ids [| next |];
+    incr step;
+    if is_eos next then finished := true
   done;
   !ids
 

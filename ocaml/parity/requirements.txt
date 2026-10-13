@@ -1,0 +1,14 @@
+# Reference-export environment for ocaml/parity/*.py.
+# Pinned exactly: the reference safetensors files are only valid for this
+# stack. Bumping any of these invalidates every reference and requires
+# re-exporting all of them together.
+#
+#   python -m venv <env> && <env>/bin/pip install -r ocaml/parity/requirements.txt
+#   <env>/bin/python ocaml/parity/export_reference.py /data/tmp/ocaml-parity/gpt2_ref.safetensors
+#   <env>/bin/python ocaml/parity/export_kv.py       /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
+#   <env>/bin/python ocaml/parity/export_gen.py      /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
+#
+# torch is pinned to the CPU build because that is what generated the refs.
+torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+transformers==5.19.0
+safetensors==0.8.0

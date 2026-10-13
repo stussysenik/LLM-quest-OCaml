@@ -193,9 +193,15 @@ llm_quest/alignment/dpo/instruction-data-with-preference.json
 
 ### OCaml ###
 ocaml/_build/
+# Build products from `make` (ocamlopt -o <name>). Anchored to the repo
+# root; every target in ocaml/Makefile needs a line here.
 ocaml/test_all
+ocaml/test_batched
+ocaml/test_kv
 ocaml/demo
 ocaml/parity_check
+ocaml/parity_kv
+ocaml/parity_gen
 # NOTE: the Python stanza above ignores `lib/` (packaging); un-ignore ours
 !ocaml/lib/
 *.cmi

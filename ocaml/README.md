@@ -17,7 +17,10 @@ Python/PyTorch repo at the workspace root. Goal, per the project brief:
 | `lib/gpt.ml` | `llm_quest/gpt/gpt_model.py` (`GPTModel`) |
 | `lib/sampling.ml` | `sampling*` + `generate_simple_loop` in `llm_quest/generate.py` |
 | `bin/main.ml` | PART A demo in `generate.py __main__` |
+| `lib/sampling.ml` | `sampling*` + `generate_simple_loop` in `llm_quest/generate.py` |
+| `lib/hf_loader.ml` | HF `gpt2` safetensors naming map |
 | `test/test_all.ml` | `__main__` checks in `gpt_attention.py` / `generate.py` |
+| `test/parity*.ml` | PyTorch parity harnesses (activations, KV, generation) |
 
 ## Build
 
@@ -45,14 +48,43 @@ ocamlopt -I lib -o demo \
 
 ## Deliberate simplifications (documented in code)
 
-- Single batch / single sequence (no `(b, s, d)` batching yet).
 - Dropout is identity at inference (all shipped configs use `0.0`).
-- `generate_simple_loop` only; batched + KV-cache generate loops come
-  with the batched forward.
-- Weight init is GPT-2 style `N(0, 0.02)`; no pretrained-weight loader yet.
+- No tokenizer. Generation parity is gated on **token IDs**, not decoded
+  text — the reference file carries the tokenized prompt, so both sides
+  start from identical input.
+- Only the HF `gpt2` checkpoint is loaded; `Config.gpt_config_124m` and
+  the `transformer.h.N.*` naming map are the GPT-family specializations.
+
+## Running everything
+
+`make ci` is the one-command green-tree proof: 45 unit gates + 14
+PyTorch parity stages + a 12-layer KV cross-check + 5 generation gates,
+about 1m45s on one CPU core.
+
+```bash
+cd ocaml && make ci
+```
+
+The PyTorch stages need reference files generated once against the
+pinned stack in `parity/requirements.txt` (CPU is fine):
+
+```bash
+python -m venv /tmp/parity-env && /tmp/parity-env/bin/pip install -r parity/requirements.txt
+/tmp/parity-env/bin/python parity/export_reference.py /data/tmp/ocaml-parity/gpt2_ref.safetensors
+/tmp/parity-env/bin/python parity/export_kv.py       /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
+/tmp/parity-env/bin/python parity/export_gen.py      /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
+```
+
+`parity/pinned.py` refuses to export against a different `transformers`
+than the committed references were built with — otherwise a version bump
+would silently invalidate them and look like a phantom regression.
 
 ## Roadmap
 
-1. Batched forward (`b x s x d`) + `generate_loop` / `generate_loop_kv_cache`.
-2. Weight loader for the `gpt_s` checkpoint (`gpt_download_weights.py`).
-3. `gpt_to_llama3/` (GQA, RoPE, RMSNorm, SwiGLU), then MoE / GRPO.
+1. `config.ml` → model family; `test/parity.ml` → parameterized harness;
+   `hf_loader.ml` → shared `safetensors.ml` + per-family loaders.
+2. Llama deltas, each gated in isolation: RMSNorm → SwiGLU → RoPE → GQA.
+3. Llama full parity on `hf-internal-testing/tiny-random-LlamaForCausalLM`,
+   then greedy generation parity.
+4. Tokenizer (deferred — not on the critical path for model correctness).
+5. MoE / GRPO.

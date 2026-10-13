@@ -14,14 +14,15 @@ The governing rule, from the review that set this order:
 - [x] Causal invariant: row 0 of a 2-token forward == 1-token forward
 - [x] Demo binary generates greedily (`bin/main.ml`)
 
-These tests prove **self-consistency only** — not parity with PyTorch.
+At that commit these tests proved **self-consistency only**. Steps 1-6
+below replaced that with PyTorch parity.
 
 ## Deliberate simplifications (unverified / missing)
 
-- Single sequence only, no batch dim (`b x s x d`)
 - Dropout is identity at inference (matches all shipped configs: `0.0`)
-- `generate_simple_loop` only (no KV-cache / batched loops)
-- No weight loading — random init only (`N(0, 0.02)`)
+- No tokenizer — generation parity is gated on token IDs, which is the
+  part the model owns
+- `gpt2` (HF `gpt2`) only; the Llama family is the next port
 
 ## Ordered plan (each step gates the next)
 
@@ -32,7 +33,7 @@ These tests prove **self-consistency only** — not parity with PyTorch.
 | 3 | **Final logits parity** — single-sequence forward on loaded weights | ✅ Logits match to ~5e-5 |
 | 4 | **Batched forward** — batch dim over shared single-sequence kernels | ✅ batch=1 ≡ single (bit-exact); repeats identical; padding+positions; per-sequence last-token; greedy decode parity |
 | 5 | **KV-cache generation loop** — prefill + decode steps over `Kv_cache` | ✅ K1 cache ≡ no-cache tokens; K2 cache ≡ full-forward K/V; K3 batched ≡ single; K4 EOS freeze; K5 positions; plus cross-check vs PyTorch `past_key_values` (12/12 layers OK) |
-| 6 | **Checkpoint loader + real text** — GPT-2 checkpoint format end to end | Token-by-token match with HuggingFace generation |
+| 6 | **Checkpoint loader + real text** — GPT-2 checkpoint format end to end | ✅ Greedy generation token-for-token vs `generate(do_sample=False)`: 20/20 exact (cached), 5-token prefix exact (simple loop), plus HF's stop contract |
 
 ## Notes
 
@@ -42,7 +43,17 @@ These tests prove **self-consistency only** — not parity with PyTorch.
 - HF `Conv1D` weights are stored `(in, out)` — no transpose needed.
   `lm_head` (`nn.Linear`) is stored `(out, in)` — transpose needed.
 - Reference export script lives in `ocaml/parity/` (Python side, needs
-  torch+transformers, CPU is fine).
+  torch+transformers, CPU is fine). `parity/requirements.txt` pins the
+  stack (`transformers==5.19.0`, `torch==2.14.1+cpu`,
+  `safetensors==0.8.0`, `gpt2@607a30d7`) and `parity/pinned.py` refuses
+  to run against anything else. Without the pin a `pip install -U
+  transformers` invalidates the committed references and the resulting
+  gate failure reads as a phantom OCaml regression.
+- Generation parity (step 6) compares **token IDs, not decoded text** —
+  the OCaml side has no tokenizer by design, and the reference file
+  carries the tokenized prompt so both sides start from identical input.
+  A tokenizer is its own project (see Llama notes), not a prerequisite
+  for model correctness.
 - transformers 5.x `GPT2Model` appends the **post-`ln_f`** state as
   `hidden_states[-1]` (verified: `hidden.12 @ lm_head.T == logits` to
   3e-5, and its std is ~5 vs ~80 for the raw outlier-dominated

@@ -10,6 +10,8 @@ with use_cache=True, and saves per-layer K/V (batch squeezed to
 
 Usage:
     python ocaml/parity/export_kv.py /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
+
+Pinned stack: see parity/requirements.txt + parity/pinned.py.
 """
 
 import sys
@@ -18,11 +20,16 @@ import torch
 from safetensors.torch import save_file
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
+import pinned
+
+pinned.check_pinned()
+
 
 def main(out_path, prompt="Hello world", extra=2):
-    model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
-    tok = GPT2Tokenizer.from_pretrained("gpt2")
+    model = GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
+    tok = GPT2Tokenizer.from_pretrained("gpt2", revision=pinned.GPT2_REVISION)
     ids = tok(prompt, return_tensors="pt").input_ids
+    print(pinned.banner())
     with torch.no_grad():
         for _ in range(extra):
             out = model(ids)

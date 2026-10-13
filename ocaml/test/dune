@@ -1,3 +1,3 @@
 (executables
- (names test_all test_batched test_kv parity parity_kv)
+ (names test_all test_batched test_kv parity parity_kv parity_gen)
  (libraries llm_quest))
