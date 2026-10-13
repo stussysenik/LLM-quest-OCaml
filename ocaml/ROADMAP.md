@@ -46,7 +46,7 @@ it with the next. `make ci` stays green after every row.
 | B | `test/parity.ml` → parameterized (`run ~family`, family-erased `runnable`); `export_reference.py --family {gpt2,llama}` | ✅ B1 GPT-2 parity **bit-identical** through the new path; B2 `make ci` gate count unchanged, 101.9s → measured; B3 `--family llama` export runs, prints the `hidden_states[-1]` convention + `tie_word_embeddings`; B4 `run`'s body has no family branch |
 | C | `hf_loader.ml` split → `gpt2_loader.ml` + `llama_loader.ml` + `llama.ml` (`safetensors.ml` stays shared, gains `get_tensor`/`require_absent`/`assert_exact_keys`) | ✅ C1 key set + every shape match the config; C2 loaded params == file's 1032272; C3 three wrong-config variants each raise naming the tensor; C4 (15 gates total) tie aliases (physically, `==`) / untied-without-head raises / tie-with-head raises; C5 `--family llama` loads weights then stops at step D; GPT-2 parity **bit-identical** through the rewritten loader |
 | L | **Weight layout → `[out, in]` project-wide.** `Attention.linear.w` becomes `(out, in)`; `Tensor.linear_fwd` is the one linear op and has no layout parameter; `Gpt2_loader` transposes `Conv1D` from `(in, out)` at load; `Llama_loader` unchanged (already `nn.Linear` order) | ✅ GPT-2 parity **bit-identical** — every `max_abs_diff` unchanged to the digit, which is the proof the refactor computes the same function; from-scratch weights *and* logits bit-identical as well; new gate `layout_gpt2_out_in` / `layout_llama_out_in` re-derives each `out` from the config, covering the square projections shape assertions cannot |
-| D1 | RMSNorm | vs `LlamaRMSNorm` on random input (1e-6, tiny + `hidden=2048`); eps-inside-sqrt; differential vs GPT-2 LayerNorm (no mean subtraction, no bias) |
+| D1 | RMSNorm | ✅ vs `LlamaRMSNorm` at hidden 16 **and** 2048 (3.3e-7 / 7.8e-7, dual abs+rel 1e-6); zero-mean identity vs LayerNorm exact (0.0); shift-sensitive where LayerNorm is shift-invariant; zero weight zeroes the output; eps placement changes the result (2.4e-6) both ways; `Config.norm_eps` family-specific (1e-6 Llama / 1e-5 GPT-2) and it is the value the op ran with. **13 gates**, each proved to bite by mutating the op |
 | D2 | SwiGLU | vs `LlamaMLP`: `down(silu(gate(x)) * up(x))`, width = `intermediate_size` |
 | D3 | RoPE, base | relative-position invariance `q·k(i,j) == q·k(i+d,j+d)`; direct vs `apply_rotary_pos_emb`; cached-at-pos-p ≡ full-forward row p |
 | D4 | RoPE, `llama3` scaling | vs `_compute_llama3_parameters` on the frequency table alone, before any attention |
@@ -82,6 +82,7 @@ separate `make ci-llama` target rather than the main `make ci`.
 | `/data/tmp/ocaml-parity/gpt2_gen_ref.safetensors` | gpt2 | `parity/export_gen.py` |
 | `/data/tmp/ocaml-parity/llama_ref.safetensors` | llama (`hf-internal-testing/tiny-random-LlamaForCausalLM`, ~5MB) | `parity/export_reference.py --family llama` |
 | `/data/tmp/ocaml-parity/llama_tied_ref.safetensors` | llama, head tied (same weights, no `lm_head.weight`) | `parity/export_reference.py --family llama --drop-head` |
+| `/data/tmp/ocaml-parity/norm_ref.safetensors` | RMSNorm inputs + `LlamaRMSNorm` outputs (no model weights) | `parity/export_norm.py` |
 
 - `parity/requirements.txt` installs torch **separately**, from the
   CPU index only. `--index-url` inside a requirements file is a global
@@ -105,6 +106,30 @@ separate `make ci-llama` target rather than the main `make ci`.
   square ones are the job of the layout gate (`layout_gpt2_out_in`,
   `layout_llama_out_in`), which re-derives each matrix's expected `out`
   from the config *independently* of the loader's own `~expected_shape`.
+- **A normalization convention is a name, not a parameter.** `norm.ml` has
+  one kernel, `norm_forward`, taking `~centering` (`Centering` /
+  `No_centering`) and `~eps_placement` (`Eps_inside_sqrt` /
+  `Eps_outside_sqrt`) as named variants; `layer_norm` and `rms_norm` state
+  theirs and are the only two things the rest of the repo calls.
+  `rms_norm` takes no convention flag at all — no centering, no shift, eps
+  inside the sqrt *is* what the name means. A boolean that inverts at every
+  call site is the thing someone flips without reading, and the eps
+  difference between the two conventions is ~5e-6 relative: invisible in
+  training, fatal for a 1e-6 parity gate. Renaming `eps_inside_sqrt` to the
+  variant was mechanical and **bit-identical** — all 14 GPT-2 parity
+  `max_abs_diff` values are unchanged to the digit, which is the proof the
+  refactor computes the same function and not merely a similar one.
+- **D1's differential gate is the one that matters.** An RMSNorm that
+  quietly kept the mean subtraction breaches D1a on most inputs — but
+  *passes* it on any input whose mean is ~0, and passes D1b's zero-mean
+  identity by construction (that identity is what says the mean
+  subtraction is the only difference). What catches it is shift
+  *sensitivity*: LayerNorm is shift-invariant by definition and RMSNorm is
+  not, so a shift-sensitivity gate cannot be satisfied by a LayerNorm.
+  All four mutations were run against the committed gates to confirm each
+  one bites: keeping the mean subtraction, moving eps outside the sqrt,
+  adding a bias, and crossing `Config.norm_eps` (which D1a catches
+  numerically at 4e-5, so D1d is not merely self-referential).
 - `embed_tokens` and a tied `lm_head` are `[vocab, hidden]` — the
   embedding table's own layout, which coincides with `[out, in]` for the
   head. Tying therefore needs no transpose, and C4a pins that the tied

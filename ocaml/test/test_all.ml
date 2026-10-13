@@ -36,7 +36,7 @@ let () =
 
   (* --- LayerNorm: zero mean, unit var (unbiased=false, like torch) --- *)
   let ln = Norm.layernorm_make 3 in
-  let y = Norm.layernorm_forward ln [| [| 1.0; 2.0; 3.0 |] |] in
+  let y = Norm.layer_norm ln [| [| 1.0; 2.0; 3.0 |] |] in
   check "layernorm_mean_zero" (approx_eq (mean_vec y.(0)) 0.0 1e-6);
   check "layernorm_std_one" (approx_eq (std_vec y.(0) 0.0) 1.0 1e-3);
 

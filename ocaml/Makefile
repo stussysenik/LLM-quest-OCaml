@@ -4,6 +4,7 @@ REF_KV ?= /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
 REF_GEN ?= /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
 REF_LLAMA ?= /data/tmp/ocaml-parity/llama_ref.safetensors
 REF_LLAMA_TIED ?= /data/tmp/ocaml-parity/llama_tied_ref.safetensors
+REF_NORM ?= /data/tmp/ocaml-parity/norm_ref.safetensors
 # Parity is parameterized by family; the dispatch lives in test/parity.ml,
 # so a new family is a new loader + export script, not a new target.
 FAMILY ?= gpt2
@@ -22,6 +23,9 @@ test_kv: $(LIB) test/test_kv.ml
 test_loader: $(LIB) test/test_loader.ml
 	ocamlopt -I lib -o test_loader $(LIB) test/test_loader.ml
 
+test_norm: $(LIB) test/test_norm.ml
+	ocamlopt -I lib -o test_norm $(LIB) test/test_norm.ml
+
 demo: $(LIB) bin/main.ml
 	ocamlopt -I lib -o demo $(LIB) bin/main.ml
 
@@ -34,8 +38,10 @@ parity_kv: $(LIB) test/parity_kv.ml
 parity_gen: $(LIB) test/parity_gen.ml
 	ocamlopt -I lib -o parity_gen $(LIB) test/parity_gen.ml
 
-test: test_all test_batched test_kv test_loader
+test: test_all test_batched test_kv test_loader test_norm
 	./test_all && ./test_batched && ./test_kv && ./test_loader $(REF_LLAMA) $(REF_LLAMA_TIED)
+	@test -f $(REF_NORM) || (echo "norm reference not found: $(REF_NORM) -- run: python ocaml/parity/export_norm.py $(REF_NORM)" && exit 1)
+	./test_norm $(REF_NORM)
 
 demo-run: demo
 	./demo
@@ -69,6 +75,6 @@ parity-llama-boundary: parity_check
 ci: test parity parity-kv parity-gen parity-llama-boundary
 
 clean:
-	rm -f test_all test_batched test_kv test_loader demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
+	rm -f test_all test_batched test_kv test_loader test_norm demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
 
 .PHONY: all test demo-run parity parity-kv parity-gen parity-llama-boundary ci clean

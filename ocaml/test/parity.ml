@@ -133,14 +133,15 @@ let gpt2 : family =
         {
           n_layers;
           states = (fun ids -> Gpt.forward_states m ids);
-          final_norm = (fun x -> Norm.layernorm_forward m.Gpt.final_ln x);
+          final_norm = (fun x -> Norm.layer_norm m.Gpt.final_ln x);
           logits = (fun ids -> Gpt.forward m ids);
           final_norm_label = Printf.sprintf "block_%d_lnf" (n_layers - 1);
         });
   }
 
 (** The Llama loader landed in ROADMAP step C and does run — but there
-    is no forward pass yet: RMSNorm, SwiGLU, RoPE and GQA are D1-D5.
+    is no forward pass yet: RMSNorm (D1) exists and is gated in
+    isolation, while SwiGLU (D2), RoPE (D3/D4) and GQA (D5) have not.
     Weights load first so that reaching this message means the loader
     worked on the real file; the boundary it reports is the kernels,
     not the parsing. *)
@@ -151,7 +152,7 @@ let llama : family =
       (fun path ->
         let _weights = Llama_loader.load (Safetensors.open_file path) Config.llama_tiny_random_config in
         failwith
-          "Parity: --family llama loads its weights, but the forward pass needs ROADMAP step D (RMSNorm, SwiGLU, RoPE, GQA)");
+          "Parity: --family llama loads its weights, but the forward pass needs ROADMAP step D (D2 SwiGLU, D3/D4 RoPE, D5 GQA; D1 RMSNorm is done)");
   }
 
 let families = [ gpt2; llama ]

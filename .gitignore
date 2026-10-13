@@ -199,6 +199,7 @@ ocaml/test_all
 ocaml/test_batched
 ocaml/test_kv
 ocaml/test_loader
+ocaml/test_norm
 ocaml/demo
 ocaml/parity_check
 ocaml/parity_kv

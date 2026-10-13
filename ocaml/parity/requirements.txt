@@ -22,6 +22,7 @@
 #   <env>/bin/python ocaml/parity/export_reference.py --family llama /data/tmp/ocaml-parity/llama_ref.safetensors
 #   <env>/bin/python ocaml/parity/export_kv.py       /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
 #   <env>/bin/python ocaml/parity/export_gen.py      /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
+#   <env>/bin/python ocaml/parity/export_norm.py     /data/tmp/ocaml-parity/norm_ref.safetensors
 #
 transformers==5.19.0
 safetensors==0.8.0

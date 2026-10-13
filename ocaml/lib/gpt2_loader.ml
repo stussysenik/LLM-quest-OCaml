@@ -43,7 +43,7 @@ let layernorm_of (f : Safetensors.file) (prefix : string) ~(eps : float) ~(hidde
     Norm.scale = Safetensors.get_vector f (prefix ^ ".weight") ~expected_len:hidden;
     shift = Safetensors.get_vector f (prefix ^ ".bias") ~expected_len:hidden;
     eps;
-    eps_inside_sqrt = true (* HF/PyTorch convention: eps inside the sqrt *);
+    eps_placement = Norm.Eps_inside_sqrt (* HF/PyTorch convention: eps inside the sqrt *);
   }
 
 (** HF `Conv1D` stores [(in, out)]; the project convention is

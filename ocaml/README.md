@@ -25,6 +25,7 @@ Python/PyTorch repo at the workspace root. Goal, per the project brief:
 | `test/test_all.ml` | `__main__` checks in `gpt_attention.py` / `generate.py` |
 | `test/parity*.ml` | PyTorch parity harnesses (activations, KV, generation) |
 | `test/test_loader.ml` | Loader gates C1-C4 + the `[out, in]` layout gate |
+| `test/test_norm.ml` | RMSNorm gates D1a-D1d vs `LlamaRMSNorm` |
 
 ## Build
 
@@ -68,10 +69,10 @@ plausible-looking default.
 
 ## Running everything
 
-`make ci` is the one-command green-tree proof: 60 unit gates + 15
-loader gates + 14 PyTorch parity stages + a 12-layer KV cross-check +
-5 generation gates + the step-D boundary check, about two minutes on
-one CPU core.
+`make ci` is the one-command green-tree proof: 60 unit gates + 16
+loader gates + 13 norm gates + 14 PyTorch parity stages + a 12-layer KV
+cross-check + 5 generation gates + the step-D boundary check, about two
+minutes on one CPU core.
 
 ```bash
 cd ocaml && make ci
@@ -86,7 +87,12 @@ python -m venv /tmp/parity-env && /tmp/parity-env/bin/pip install -r parity/requ
 /tmp/parity-env/bin/python parity/export_reference.py --family llama /data/tmp/ocaml-parity/llama_ref.safetensors
 /tmp/parity-env/bin/python parity/export_kv.py       /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
 /tmp/parity-env/bin/python parity/export_gen.py      /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
+/tmp/parity-env/bin/python parity/export_norm.py      /data/tmp/ocaml-parity/norm_ref.safetensors
 ```
+
+`export_norm.py` is the one that carries no model: it instantiates
+`LlamaRMSNorm` on random inputs and writes them alongside HF's output, so
+the D1 gate cannot pass by agreeing with PyTorch on the wrong numbers.
 
 `export_reference.py` is one script for both families: `--family` picks
 the model class, tokenizer and pinned revision from a table, and the
@@ -104,8 +110,9 @@ pin covers both families: bump it, and re-export every reference.
 
 Full gate sequence in `ROADMAP.md`. The parity harness is parameterized
 by family (`./parity_check --family {gpt2,llama}`; a family supplies a
-loader, and `run`'s stage loop has no family branch). Next: split the
-loader, then the Llama deltas — RMSNorm, SwiGLU, RoPE (base +
+loader, and `run`'s stage loop has no family branch). Done: step A (one
+config record), B (parameterized harness), C (loader split) and D1
+(RMSNorm). Next: the remaining Llama deltas — SwiGLU, RoPE (base +
 `llama3` scaling), GQA — each gated in isolation before composition,
 then parity on `tiny-random-LlamaForCausalLM`. Real Llama-3.2-1B
 weights are an optional final check, not a prerequisite.

@@ -62,12 +62,12 @@ let add_mat (a : mat) (b : mat) : mat =
     and parity keeps proving both. *)
 let block_forward_kv ?(attn_mask : bool array option = None) ?(kv : Kv_cache.layer_kv option = None)
     (blk : block) (x : mat) : mat * Tensor.mat array * Tensor.mat array =
-  let h1 = Norm.layernorm_forward blk.ln1 x in
+  let h1 = Norm.layer_norm blk.ln1 x in
   let qh, kh, vh = Attention.project_split blk.att h1 in
   let kh_full, vh_full = Attention.with_prefix blk.att kv kh vh in
   let a = Attention.combine ~attn_mask blk.att qh kh_full vh_full in
   let h = add_mat x a in
-  let h2 = Norm.layernorm_forward blk.ln2 h in
+  let h2 = Norm.layer_norm blk.ln2 h in
   let f = ffn_forward blk.ffn h2 in
   (add_mat h f, kh, vh)
 

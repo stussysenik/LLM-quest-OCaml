@@ -74,7 +74,7 @@ let mask_of_batch (attn_mask : bool array array option) (i : int) : bool array o
 let forward_from_emb ?(attn_mask : bool array option = None) (m : t) (emb : mat) : mat =
   let x = ref emb in
   List.iter (fun blk -> x := Block.block_forward ~attn_mask blk !x) m.blocks;
-  let h = Norm.layernorm_forward m.final_ln !x in
+  let h = Norm.layer_norm m.final_ln !x in
   Attention.linear_forward_batch m.lm_head h
 
 let forward ?(attn_mask : bool array option = None) (m : t) (ids : int array) : mat =
@@ -157,7 +157,7 @@ let forward_with_kv ?(attn_mask : bool array option = None) (m : t) (ids : int a
       traces := (kh, vh) :: !traces;
       x := out)
     m.blocks;
-  let h = Norm.layernorm_forward m.final_ln !x in
+  let h = Norm.layer_norm m.final_ln !x in
   (Attention.linear_forward_batch m.lm_head h, List.rev !traces)
 
 let num_parameters (m : t) : int =
@@ -199,7 +199,7 @@ let prefill_cached (m : t) (cache : Kv_cache.t) ?(attn_mask : bool array option 
       Kv_cache.push cache ~layer_idx:li ~keys:kh ~values:vh;
       x := out)
     m.blocks;
-  let h = Norm.layernorm_forward m.final_ln !x in
+  let h = Norm.layer_norm m.final_ln !x in
   Attention.linear_forward_batch m.lm_head h
 
 (** One decode step: single token [tok] at absolute position [pos],
@@ -219,7 +219,7 @@ let decode_step_cached (m : t) (cache : Kv_cache.t) (tok : int) (pos : int) : ve
       Kv_cache.push cache ~layer_idx:li ~keys:kh ~values:vh;
       x := out)
     m.blocks;
-  let h = Norm.layernorm_forward m.final_ln !x in
+  let h = Norm.layer_norm m.final_ln !x in
   (Attention.linear_forward_batch m.lm_head h).(0)
 
 (** Greedy/tempered generation with KV cache (Gate K1): prefill once,
