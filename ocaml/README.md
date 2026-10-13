@@ -11,6 +11,7 @@ Python/PyTorch repo at the workspace root. Goal, per the project brief:
 | `lib/config.ml` | `config.py` (GPT family) |
 | `lib/tensor.ml` | `torch` ops used across `llm_quest/` |
 | `lib/norm.ml` | `LayerNorm`, `GELU` in `llm_quest/gpt/gpt_transformer_block.py` |
+| `lib/mlp.ml` | SwiGLU — `LlamaMLP` (transformers), `SiLU`/`FFN` in `gpt_to_llama3/llama_transformer_block.py` |
 | `lib/kv_cache.ml` | `KVCache` in `llm_quest/utils.py` |
 | `lib/attention.ml` | `llm_quest/gpt/gpt_attention.py` (v1/v2/v3 + `MultiHeadAttention`) |
 | `lib/block.ml` | `FFN`, `TransformerBlock` in `gpt_transformer_block.py` |
@@ -26,6 +27,7 @@ Python/PyTorch repo at the workspace root. Goal, per the project brief:
 | `test/parity*.ml` | PyTorch parity harnesses (activations, KV, generation) |
 | `test/test_loader.ml` | Loader gates C1-C4 + the `[out, in]` layout gate |
 | `test/test_norm.ml` | RMSNorm gates D1a-D1d vs `LlamaRMSNorm` |
+| `test/test_mlp.ml` | SwiGLU gates D2a-D2e vs `LlamaMLP` |
 
 ## Build
 
@@ -88,6 +90,7 @@ python -m venv /tmp/parity-env && /tmp/parity-env/bin/pip install -r parity/requ
 /tmp/parity-env/bin/python parity/export_kv.py       /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
 /tmp/parity-env/bin/python parity/export_gen.py      /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
 /tmp/parity-env/bin/python parity/export_norm.py      /data/tmp/ocaml-parity/norm_ref.safetensors
+/tmp/parity-env/bin/python parity/export_mlp.py       /data/tmp/ocaml-parity/mlp_ref.safetensors
 ```
 
 `export_norm.py` is the one that carries no model: it instantiates

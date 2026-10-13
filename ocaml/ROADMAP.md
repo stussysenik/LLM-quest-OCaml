@@ -47,7 +47,7 @@ it with the next. `make ci` stays green after every row.
 | C | `hf_loader.ml` split → `gpt2_loader.ml` + `llama_loader.ml` + `llama.ml` (`safetensors.ml` stays shared, gains `get_tensor`/`require_absent`/`assert_exact_keys`) | ✅ C1 key set + every shape match the config; C2 loaded params == file's 1032272; C3 three wrong-config variants each raise naming the tensor; C4 (15 gates total) tie aliases (physically, `==`) / untied-without-head raises / tie-with-head raises; C5 `--family llama` loads weights then stops at step D; GPT-2 parity **bit-identical** through the rewritten loader |
 | L | **Weight layout → `[out, in]` project-wide.** `Attention.linear.w` becomes `(out, in)`; `Tensor.linear_fwd` is the one linear op and has no layout parameter; `Gpt2_loader` transposes `Conv1D` from `(in, out)` at load; `Llama_loader` unchanged (already `nn.Linear` order) | ✅ GPT-2 parity **bit-identical** — every `max_abs_diff` unchanged to the digit, which is the proof the refactor computes the same function; from-scratch weights *and* logits bit-identical as well; new gate `layout_gpt2_out_in` / `layout_llama_out_in` re-derives each `out` from the config, covering the square projections shape assertions cannot |
 | D1 | RMSNorm | ✅ vs `LlamaRMSNorm` at hidden 16 **and** 2048 (3.3e-7 / 7.8e-7, dual abs+rel 1e-6); zero-mean identity vs LayerNorm exact (0.0); shift-sensitive where LayerNorm is shift-invariant; zero weight zeroes the output; eps placement changes the result (2.4e-6) both ways; `Config.norm_eps` family-specific (1e-6 Llama / 1e-5 GPT-2) and it is the value the op ran with. **13 gates**, each proved to bite by mutating the op |
-| D2 | SwiGLU | vs `LlamaMLP`: `down(silu(gate(x)) * up(x))`, width = `intermediate_size` |
+| D2 | SwiGLU | ✅ vs `LlamaMLP` at hidden 16/inter 64 and the square 256/256 (8.0e-7 / 1.8e-6, dual abs+rel 1e-5 — the reference is fp32; mid is square on purpose so a transposed `down_proj` fails *silently* rather than raising); zero input zeroes the op and not the GPT-2 FFN (no bias); up path load-bearing; silu stable (naive sigmoid caught at -710); `Config.ffn_inner` is `intermediate_size` (128 ≠ 4×64 on tiny_test) and is the shape D2a's weights were checked against; GELU-on-the-gate changes the function. **19 gates**, all six mutations ran against the committed gates — each bites its own gate |
 | D3 | RoPE, base | relative-position invariance `q·k(i,j) == q·k(i+d,j+d)`; direct vs `apply_rotary_pos_emb`; cached-at-pos-p ≡ full-forward row p |
 | D4 | RoPE, `llama3` scaling | vs `_compute_llama3_parameters` on the frequency table alone, before any attention |
 | D5 | GQA | vs `LlamaAttention`; KV cache sized by `Config.kv_heads`, not `num_heads` |
@@ -83,6 +83,7 @@ separate `make ci-llama` target rather than the main `make ci`.
 | `/data/tmp/ocaml-parity/llama_ref.safetensors` | llama (`hf-internal-testing/tiny-random-LlamaForCausalLM`, ~5MB) | `parity/export_reference.py --family llama` |
 | `/data/tmp/ocaml-parity/llama_tied_ref.safetensors` | llama, head tied (same weights, no `lm_head.weight`) | `parity/export_reference.py --family llama --drop-head` |
 | `/data/tmp/ocaml-parity/norm_ref.safetensors` | RMSNorm inputs + `LlamaRMSNorm` outputs (no model weights) | `parity/export_norm.py` |
+| `/data/tmp/ocaml-parity/mlp_ref.safetensors` | SwiGLU inputs/weights + `LlamaMLP` outputs + the silu extreme grid (no model weights) | `parity/export_mlp.py` |
 
 - `parity/requirements.txt` installs torch **separately**, from the
   CPU index only. `--index-url` inside a requirements file is a global
@@ -138,6 +139,17 @@ separate `make ci-llama` target rather than the main `make ci`.
   num_attention_heads` (4/4) — **no GQA**. Step E therefore does not
   cover GQA; `Config.llama_tiny_test_config` (4 heads / 2 kv heads)
   and step D5 do. Do not read a green E as a green GQA.
+
+- **D2's mutation table, all six run against the committed gates:**
+
+  | Mutation | Caught by |
+  |---|---|
+  | GELU instead of silu on the gate | D2a tiny+mid (3.4e-1 / 4.0e-1), D2e (diff 0.0) |
+  | Naive sigmoid `1/(1+exp(-x))` | D2c's -710 gate **only** — in fp64 the naive form *is* the stable one to ~1e-16 everywhere except below the exp-overflow boundary (~-709.78), where it collapses to -0.0 against the true ~-7e-306. The gate pins the fp64 kernel to the *function*, stricter than the fp32 reference (which also flushes it to -0.0) — the same reasoning as `rms_norm` accumulating in fp64. |
+  | Bias on `down_proj` | D2b's zero-input gate (+ D2a). A bias on `gate_proj`/`up_proj` is *masked* at zero input — the other path multiplies it by zero — and is caught by D2a numerically instead. The asymmetry is the gate's finding, not a hole: only a down-proj bias survives a zero input. |
+  | `gate_proj` ↔ `up_proj` swapped | D2a tiny+mid — silu is not commutative under swap, and the export's independent random weights make the two orders differ (2.4e-1 / 1.8e-1). Verified that the chosen inputs distinguish them, as the plan required. |
+  | `down_proj` transposed (reads `hidden` as `d_in`) | D2a mid *silently* (3.7e-1 — a square down_proj multiplies to plausible numbers), tiny *loudly* (inner-dim raise). Both observed; mid is square on purpose. |
+  | `ffn_inner` = `4 * hidden` for Llama | D2d (`tiny_test`: 128 ≠ 256). The `tiny_random` config cannot catch this — 4×16 = 64 coincides — which is why D2d asserts the distinguishable config. |
 
 - HF `gpt2` uses `gelu_new` (tanh approx), the repo uses exact-erf GELU.
   The loader must select the matching activation or parity will fail at

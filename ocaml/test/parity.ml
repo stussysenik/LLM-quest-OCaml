@@ -140,8 +140,8 @@ let gpt2 : family =
   }
 
 (** The Llama loader landed in ROADMAP step C and does run — but there
-    is no forward pass yet: RMSNorm (D1) exists and is gated in
-    isolation, while SwiGLU (D2), RoPE (D3/D4) and GQA (D5) have not.
+    is no forward pass yet: RMSNorm (D1) and SwiGLU (D2) exist and are
+    gated in isolation, while RoPE (D3/D4) and GQA (D5) have not.
     Weights load first so that reaching this message means the loader
     worked on the real file; the boundary it reports is the kernels,
     not the parsing. *)
@@ -152,7 +152,7 @@ let llama : family =
       (fun path ->
         let _weights = Llama_loader.load (Safetensors.open_file path) Config.llama_tiny_random_config in
         failwith
-          "Parity: --family llama loads its weights, but the forward pass needs ROADMAP step D (D2 SwiGLU, D3/D4 RoPE, D5 GQA; D1 RMSNorm is done)");
+          "Parity: --family llama loads its weights, but the forward pass needs ROADMAP step D (D3/D4 RoPE, D5 GQA; D1 RMSNorm and D2 SwiGLU are done)");
   }
 
 let families = [ gpt2; llama ]

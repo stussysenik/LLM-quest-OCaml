@@ -69,6 +69,10 @@ let rowvec_mul (x : vec) (w : mat) : vec =
       done;
       !s)
 
+(** Elementwise product of two same-shaped matrices ([Array.map2]
+    raises on any shape mismatch). *)
+let hadamard (a : mat) (b : mat) : mat = Array.map2 (fun ra rb -> Array.map2 ( *. ) ra rb) a b
+
 (** [linear_fwd (w (d_out x d_in)) (x (s x d_in)) (b : vec option)] =
     [x @ w^T + b] — the one linear op in this repo.
 
