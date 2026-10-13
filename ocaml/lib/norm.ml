@@ -15,8 +15,8 @@ open Tensor
 
 type layernorm = { scale : vec; shift : vec; eps : float; eps_inside_sqrt : bool }
 
-let layernorm_make dim : layernorm =
-  { scale = ones_vec dim; shift = zeros_vec dim; eps = 1e-5; eps_inside_sqrt = false }
+let layernorm_make ?(eps = 1e-5) dim : layernorm =
+  { scale = ones_vec dim; shift = zeros_vec dim; eps; eps_inside_sqrt = false }
 
 let layernorm_forward (ln : layernorm) (x : mat) : mat =
   Array.map
@@ -68,3 +68,12 @@ let apply_activation_vec (a : activation) (v : vec) : vec =
   match a with Gelu_exact -> gelu_vec v | Gelu_new -> Array.map gelu_new_scalar v
 
 let apply_activation_mat (a : activation) (m : mat) : mat = Array.map (apply_activation_vec a) m
+
+(** Config's polymorphic [Config.activation] -> these kernels. Only
+    GPT-2 configs carry one: Llama's feed-forward is SwiGLU, which is a
+    gated product rather than a pointwise function and has no [Norm]
+    counterpart. *)
+let activation_of (c : Config.t) : activation =
+  match Config.activation c with
+  | `Gelu -> Gelu_exact
+  | `Gelu_new -> Gelu_new

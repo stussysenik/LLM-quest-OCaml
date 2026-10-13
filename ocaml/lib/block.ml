@@ -7,16 +7,21 @@
       h = x + attn(ln1(x))
       y = h + ffn(ln2(h))
     ]}
-    Dropout is identity at inference (all shipped configs use 0.0). *)
+    Dropout is identity at inference (all shipped configs use 0.0).
+
+    Shapes come from [Config] accessors, not from a family match: the
+    feed-forward width is [Config.ffn_inner] (4x hidden for GPT-2,
+    [intermediate_size] for Llama) and the context bound is
+    [Config.max_positions]. *)
 
 open Tensor
 
 type ffn = { l1 : Attention.linear; l2 : Attention.linear; activation : Norm.activation }
 
-let ffn_make (rs : Random.State.t) emb_dim ?(activation = Norm.Gelu_exact) () : ffn =
+let ffn_make (rs : Random.State.t) d_in d_inner ?(activation = Norm.Gelu_exact) () : ffn =
   {
-    l1 = Attention.linear_make rs emb_dim (4 * emb_dim) ~bias:true;
-    l2 = Attention.linear_make rs (4 * emb_dim) emb_dim ~bias:true;
+    l1 = Attention.linear_make rs d_in d_inner ~bias:true;
+    l2 = Attention.linear_make rs d_inner d_in ~bias:true;
     activation;
   }
 
@@ -32,15 +37,19 @@ type block = {
   ffn : ffn;
 }
 
-let block_make (rs : Random.State.t) (cfg : Config.gpt_config) ?(activation = Norm.Gelu_exact)
-    ?(out_proj_bias = true) () : block =
+(** [activation] defaults to the config's, so the checkpoint family has
+    exactly one source of truth for it (an HF `gpt2` is [Gelu_new]; a
+    from-scratch tiny config is exact [Gelu]). *)
+let block_make (rs : Random.State.t) (cfg : Config.t) ?activation ?(out_proj_bias = true) () : block =
+  let activation = match activation with Some a -> a | None -> Norm.activation_of cfg in
   {
     att =
-      Attention.mha_make rs ~d_in:cfg.emb_dim ~d_out:cfg.emb_dim ~num_heads:cfg.n_heads
-        ~ctx_len:cfg.context_length ~qkv_bias:cfg.qkv_bias ~out_proj_bias ();
-    ln1 = Norm.layernorm_make cfg.emb_dim;
-    ln2 = Norm.layernorm_make cfg.emb_dim;
-    ffn = ffn_make rs cfg.emb_dim ~activation ();
+      Attention.mha_make rs ~d_in:cfg.Config.hidden_size ~d_out:cfg.Config.hidden_size
+        ~num_heads:cfg.Config.num_heads ~ctx_len:(Config.max_positions cfg)
+        ~qkv_bias:(Config.qkv_bias cfg) ~out_proj_bias ();
+    ln1 = Norm.layernorm_make ~eps:(Config.norm_eps cfg) cfg.Config.hidden_size;
+    ln2 = Norm.layernorm_make ~eps:(Config.norm_eps cfg) cfg.Config.hidden_size;
+    ffn = ffn_make rs cfg.Config.hidden_size (Config.ffn_inner cfg) ~activation ();
   }
 
 let add_mat (a : mat) (b : mat) : mat =

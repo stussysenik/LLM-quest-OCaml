@@ -111,7 +111,7 @@ let () =
      self-describing — no extra field to keep in sync. *)
   let eos = eos_ids.(Array.length eos_ids - 1) in
   let simple_n = 5 in
-  let ctx = model.Gpt.cfg.Config.context_length in
+  let ctx = Config.max_positions model.Gpt.cfg in
   let stop_token = fresh_token_at new_ids (simple_n - 2) in
   let stop_idx = ref 0 in
   while new_ids.(!stop_idx) <> stop_token do

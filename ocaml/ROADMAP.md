@@ -35,6 +35,41 @@ below replaced that with PyTorch parity.
 | 5 | **KV-cache generation loop** — prefill + decode steps over `Kv_cache` | ✅ K1 cache ≡ no-cache tokens; K2 cache ≡ full-forward K/V; K3 batched ≡ single; K4 EOS freeze; K5 positions; plus cross-check vs PyTorch `past_key_values` (12/12 layers OK) |
 | 6 | **Checkpoint loader + real text** — GPT-2 checkpoint format end to end | ✅ Greedy generation token-for-token vs `generate(do_sample=False)`: 20/20 exact (cached), 5-token prefix exact (simple loop), plus HF's stop contract |
 
+## Llama 3.2 port
+
+Same governing rule: verify each delta against PyTorch before composing
+it with the next. `make ci` stays green after every row.
+
+| Step | Delta | Gate |
+| :--- | :--- | :--- |
+| A | `config.ml` → one `t` for both families, family detail behind `arch`, accessors (`max_positions`, `norm_eps`, `ffn_inner`, `kv_heads`, `head_dim`, `has_learned_positions`) | ✅ GPT-2 parity **bit-identical** (every `max_abs_diff` unchanged to the digit); 15 config gates |
+| B | `test/parity.ml` → parameterized; export scripts family-tagged | export + parity green for GPT-2 via the new path |
+| C | `hf_loader.ml` split → `gpt2_loader.ml` + `llama_loader.ml` (`safetensors.ml` stays shared) | GPT-2 parity green via the new loader |
+| D1 | RMSNorm | vs `LlamaRMSNorm` on random input (1e-6, tiny + `hidden=2048`); eps-inside-sqrt; differential vs GPT-2 LayerNorm (no mean subtraction, no bias) |
+| D2 | SwiGLU | vs `LlamaMLP`: `down(silu(gate(x)) * up(x))`, width = `intermediate_size` |
+| D3 | RoPE, base | relative-position invariance `q·k(i,j) == q·k(i+d,j+d)`; direct vs `apply_rotary_pos_emb`; cached-at-pos-p ≡ full-forward row p |
+| D4 | RoPE, `llama3` scaling | vs `_compute_llama3_parameters` on the frequency table alone, before any attention |
+| D5 | GQA | vs `LlamaAttention`; KV cache sized by `Config.kv_heads`, not `num_heads` |
+| E | tiny-random Llama parity | 14 stages against `hf-internal-testing/tiny-random-LlamaForCausalLM` |
+| F | Llama-3.2-1B parity | 14 stages on real weights — **optional**, see below |
+| G | Greedy generation parity | token-for-token vs `generate(do_sample=False)` |
+
+Steps A-E need no real weights: random tensors and the ~5MB
+tiny-random checkpoint. The tokenizer (Llama 3 tiktoken BPE) is a
+separate project — all parity gates use token IDs directly, so it is not
+on the critical path for model correctness.
+
+**Step F is a final exam, not a prerequisite.** tiny-random catches every
+structural bug (layout, transpose, head grouping, RoPE convention, eps
+placement). What it cannot catch is numerical behaviour under real
+weight distributions — GPT-2's ~3000-magnitude outlier dims are exactly
+why the dual abs+rel gate exists, and random weights have none. Llama 3
+has its own "massive activations", so the same class of bug is plausible.
+Run it when convenient; a port without it is still verified, just not
+verified under real numerical conditions. Cost: ~2.5GB bf16 weights,
+~7.5GB disk with the export, minutes per forward on CPU — hence a
+separate `make ci-llama` target rather than the main `make ci`.
+
 ## Notes
 
 - HF `gpt2` uses `gelu_new` (tanh approx), the repo uses exact-erf GELU.

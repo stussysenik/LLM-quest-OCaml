@@ -5,8 +5,8 @@
 let () =
   let rs = Random.State.make [| 123 |] in
   let cfg = Config.gpt_tiny_test_config in
-  Printf.printf "cfg: vocab=%d ctx=%d emb=%d heads=%d layers=%d\n" cfg.Config.vocab_size
-    cfg.Config.context_length cfg.Config.emb_dim cfg.Config.n_heads cfg.Config.n_layers;
+  Printf.printf "cfg: vocab=%d ctx=%d hidden=%d heads=%d layers=%d\n" cfg.Config.vocab_size
+    (Config.max_positions cfg) cfg.Config.hidden_size cfg.Config.num_heads cfg.Config.num_layers;
   let model = Gpt.make rs cfg () in
   Printf.printf "params: %d\n" (Gpt.num_parameters model);
   let prompt = [| 1; 2; 3 |] in
@@ -19,7 +19,7 @@ let () =
   print_newline ();
   let out =
     Sampling.generate_simple_loop ~temp:0.0 rs ~model_forward:(Gpt.forward model)
-      ~context_length:cfg.Config.context_length prompt ~max_gen:8
+      ~context_length:(Config.max_positions cfg) prompt ~max_gen:8
   in
   Printf.printf "prompt: [%s]\n"
     (String.concat ";" (List.map string_of_int (Array.to_list prompt)));

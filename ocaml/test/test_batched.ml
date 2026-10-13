@@ -102,12 +102,12 @@ let () =
   let seq_single =
     Sampling.generate_simple_loop ~temp:0.0 rs1
       ~model_forward:(Gpt.forward model)
-      ~context_length:cfg.Config.context_length prompt ~max_gen:8
+      ~context_length:(Config.max_positions cfg) prompt ~max_gen:8
   in
   let seq_batched =
     Sampling.generate_simple_loop_batched ~temp:0.0 rs2
       ~model_forward_batch:(Gpt.forward_batch model)
-      ~context_length:cfg.Config.context_length [| prompt |] ~max_gen:8
+      ~context_length:(Config.max_positions cfg) [| prompt |] ~max_gen:8
   in
   check "g5_greedy_decode_parity"
     (Array.length seq_batched = 1
@@ -117,7 +117,7 @@ let () =
   let two =
     Sampling.generate_simple_loop_batched ~temp:0.0 (Random.State.make [| 1 |])
       ~model_forward_batch:(Gpt.forward_batch model)
-      ~context_length:cfg.Config.context_length
+      ~context_length:(Config.max_positions cfg)
       [| [| 4; 11 |]; [| 9; 2; 5 |] |]
       ~max_gen:4
   in

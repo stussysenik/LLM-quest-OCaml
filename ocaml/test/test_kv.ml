@@ -39,7 +39,7 @@ let () =
   let cfg = Config.gpt_tiny_test_config in
   let model = Gpt.make (Random.State.make [| 31337 |]) cfg () in
   let prompt = [| 4; 11; 7 |] in
-  let ctx = cfg.Config.context_length in
+  let ctx = (Config.max_positions cfg) in
 
   (* ---------- K1: cache ≡ no-cache ---------- *)
   let ref_seq =
@@ -50,20 +50,20 @@ let () =
   check "k1_cache_eq_nocache"
     (Array.length kv_seq = Array.length ref_seq && Array.for_all2 ( = ) kv_seq ref_seq);
 
-  let cache0 = Kv_cache.create ~num_layers:cfg.Config.n_layers in
+  let cache0 = Kv_cache.create ~num_layers:cfg.Config.num_layers in
   let pre = Gpt.prefill_cached model cache0 prompt in
   check "k1_prefill_eq_forward" (eq_mat_exact pre (Gpt.forward model prompt));
 
   (* ---------- K5a: absolute positions ---------- *)
   let ids4 = [| 4; 11; 7; 2 |] in
   let full4 = Gpt.forward model ids4 in
-  let cpos = Kv_cache.create ~num_layers:cfg.Config.n_layers in
+  let cpos = Kv_cache.create ~num_layers:cfg.Config.num_layers in
   ignore (Gpt.prefill_cached model cpos [| 4; 11; 7 |]);
   let row3 = Gpt.decode_step_cached model cpos 2 3 in
   check "k5a_decode_pos_eq_full_row" (eq_vec_exact row3 full4.(3));
 
   (* ---------- K2: cache state ≡ full-forward traces ---------- *)
-  let cache2 = Kv_cache.create ~num_layers:cfg.Config.n_layers in
+  let cache2 = Kv_cache.create ~num_layers:cfg.Config.num_layers in
   let pre2 = Gpt.prefill_cached model cache2 prompt in
   let rs2 = Random.State.make [| 2 |] in
   let ids = ref (Array.copy prompt) in
@@ -105,8 +105,8 @@ let () =
   (* Uneven prompts (3 vs 2): three manual decode steps must advance
      each cache by exactly one row per step on EVERY layer, at absolute
      positions len-1, len, len+1 — no shared counter. *)
-  let cA = Kv_cache.create ~num_layers:cfg.Config.n_layers in
-  let cB = Kv_cache.create ~num_layers:cfg.Config.n_layers in
+  let cA = Kv_cache.create ~num_layers:cfg.Config.num_layers in
+  let cB = Kv_cache.create ~num_layers:cfg.Config.num_layers in
   ignore (Gpt.prefill_cached model cA prompts.(0));
   ignore (Gpt.prefill_cached model cB prompts.(1));
   for step = 1 to 3 do
@@ -114,7 +114,7 @@ let () =
     ignore (Gpt.decode_step_cached model cB 2 (Array.length prompts.(1) + step - 1))
   done;
   let counters_ok = ref true in
-  for li = 0 to cfg.Config.n_layers - 1 do
+  for li = 0 to cfg.Config.num_layers - 1 do
     if Kv_cache.past_len cA li <> 6 || Kv_cache.past_len cB li <> 5 then counters_ok := false
   done;
   check "k5b_per_item_counters" !counters_ok;

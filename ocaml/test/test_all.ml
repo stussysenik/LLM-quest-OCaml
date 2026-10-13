@@ -85,10 +85,10 @@ let () =
   (* --- Transformer block shape --- *)
   let rs4 = Random.State.make [| 5 |] in
   let blk = Block.block_make rs4 Config.gpt_tiny_test_config () in
-  let xb = randn_mat rs4 4 Config.gpt_tiny_test_config.emb_dim in
+  let xb = randn_mat rs4 4 Config.gpt_tiny_test_config.Config.hidden_size in
   let ob = Block.block_forward blk xb in
   check "block_shape"
-    (Array.length ob = 4 && Array.length ob.(0) = Config.gpt_tiny_test_config.emb_dim);
+    (Array.length ob = 4 && Array.length ob.(0) = Config.gpt_tiny_test_config.Config.hidden_size);
 
   (* --- GPT forward shapes --- *)
   let rs5 = Random.State.make [| 123 |] in
@@ -137,11 +137,48 @@ let () =
   let out =
     Sampling.generate_simple_loop ~temp:0.0 rs7
       ~model_forward:(Gpt.forward tiny)
-      ~context_length:Config.gpt_tiny_test_config.context_length
+      ~context_length:(Config.max_positions Config.gpt_tiny_test_config)
       [| 1; 2 |] ~max_gen:5
   in
   check "generate_len" (Array.length out = 7);
   check "generate_prefix_kept" (out.(0) = 1 && out.(1) = 2);
+
+  (* --- Config: the two families behind one record, reached by
+         accessors. The point of the variant is that shared code never
+         matches on it, so the accessors are the whole API — gate them
+         here rather than discovering them at the first Llama block. --- *)
+  let g = Config.gpt_config_124m in
+  let l = Config.llama_tiny_test_config in
+  check "cfg_gpt2_mha" (Config.kv_heads g = g.Config.num_heads);
+  check "cfg_gpt2_learned_pos" (Config.has_learned_positions g && not (Config.has_learned_positions l));
+  check "cfg_gpt2_inner_4x" (Config.ffn_inner g = 4 * g.Config.hidden_size);
+  check "cfg_llama_inner_named" (Config.ffn_inner l = 128);
+  check "cfg_llama_gqa" (Config.kv_heads l < l.Config.num_heads && Config.head_dim l = 16);
+  check "cfg_positions" (Config.max_positions g = 1024 && Config.max_positions l = 16);
+  check "cfg_eps_family" (Config.norm_eps g = 1e-5 && Config.norm_eps l = 1e-5);
+  check "cfg_llama_biasless" (Config.qkv_bias g && not (Config.qkv_bias l));
+  check "cfg_activation_from_arch"
+    (Config.activation g = `Gelu_new && Norm.activation_of g = Norm.Gelu_new);
+  check "cfg_activation_exact" (Norm.activation_of Config.gpt_tiny_test_config = Norm.Gelu_exact);
+  check "cfg_rope" (Config.rope_theta l = 10000.0 && Config.rope_scaling l = None);
+  check "cfg_tie_word" (Config.tie_word_embeddings l);
+  check "cfg_is_llama" (Config.is_llama l && not (Config.is_llama g));
+  (* Llama-only knobs must fail loudly on GPT-2, not return a plausible
+     default: a silently wrong rope_theta is a numerical bug with no
+     other symptom. *)
+  let raises f =
+    match f () with
+    | _ -> false
+    | exception Invalid_argument _ -> true
+  in
+  check "cfg_llama_only_raises"
+    (raises (fun () -> Config.rope_theta g)
+    && raises (fun () -> Config.rope_scaling g)
+    && raises (fun () -> Config.tie_word_embeddings g)
+    && raises (fun () -> Config.activation l));
+  (* gpt2_config_creator still overrides the shared fields. *)
+  check "cfg_creator" (let x = Config.gpt2_config_creator "gpt_xl" in x.Config.num_layers = 48
+                       && x.Config.hidden_size = 1600);
 
   Printf.printf "\n%d passed, %d failed\n" !passed !failed;
   exit (if !failed = 0 then 0 else 1)

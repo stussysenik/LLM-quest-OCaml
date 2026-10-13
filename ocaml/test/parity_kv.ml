@@ -27,7 +27,7 @@ let () =
     exit 2);
   let model = Hf_loader.load_gpt2 Sys.argv.(1) in
   let n_layers = List.length model.Gpt.blocks in
-  let n_heads = model.Gpt.cfg.Config.n_heads in
+  let n_heads = model.Gpt.cfg.Config.num_heads in
   let kvf = Safetensors.open_file Sys.argv.(2) in
   let ids =
     Array.map Int64.to_int (Safetensors.i64_array_of kvf "kv.input_ids")

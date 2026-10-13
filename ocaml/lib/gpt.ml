@@ -16,32 +16,34 @@ type t = {
   blocks : Block.block list;
   final_ln : Norm.layernorm;
   lm_head : Attention.linear;
-  cfg : Config.gpt_config;
+  cfg : Config.t;
 }
 
-let make (rs : Random.State.t) (cfg : Config.gpt_config) ?(activation = Norm.Gelu_exact)
-    ?(out_proj_bias = true) () : t =
+let make (rs : Random.State.t) (cfg : Config.t) ?activation ?(out_proj_bias = true) () : t =
   let emb m = Array.map (Array.map (fun v -> v *. 0.02)) m in
   {
-    tok_emb = emb (randn_mat rs cfg.vocab_size cfg.emb_dim);
-    pos_emb = emb (randn_mat rs cfg.context_length cfg.emb_dim);
-    blocks = List.init cfg.n_layers (fun _ -> Block.block_make rs cfg ~activation ~out_proj_bias ());
-    final_ln = Norm.layernorm_make cfg.emb_dim;
-    lm_head = Attention.linear_make rs cfg.emb_dim cfg.vocab_size ~bias:false;
+    tok_emb = emb (randn_mat rs cfg.Config.vocab_size cfg.Config.hidden_size);
+    pos_emb = emb (randn_mat rs (Config.max_positions cfg) cfg.Config.hidden_size);
+    blocks =
+      List.init cfg.Config.num_layers (fun _ ->
+          Block.block_make rs cfg ?activation ~out_proj_bias ());
+    final_ln = Norm.layernorm_make ~eps:(Config.norm_eps cfg) cfg.Config.hidden_size;
+    lm_head = Attention.linear_make rs cfg.Config.hidden_size cfg.Config.vocab_size ~bias:false;
     cfg;
   }
 
 let embed_with_pos (m : t) (ids : int array) (pos : int array) : mat =
   let s = Array.length ids in
-  if s > m.cfg.context_length then invalid_arg "Gpt.embed: sequence exceeds context_length";
+  let max_pos = Config.max_positions m.cfg in
+  if s > max_pos then invalid_arg "Gpt.embed: sequence exceeds max_positions";
   if Array.length pos <> s then invalid_arg "Gpt.embed: pos_ids length mismatch";
   Array.init s (fun i ->
-      if ids.(i) < 0 || ids.(i) >= m.cfg.vocab_size then invalid_arg "Gpt.embed: token id out of range";
-      if pos.(i) < 0 || pos.(i) >= m.cfg.context_length then
-        invalid_arg "Gpt.embed: position id out of range";
+      if ids.(i) < 0 || ids.(i) >= m.cfg.Config.vocab_size then
+        invalid_arg "Gpt.embed: token id out of range";
+      if pos.(i) < 0 || pos.(i) >= max_pos then invalid_arg "Gpt.embed: position id out of range";
       let te = Array.copy m.tok_emb.(ids.(i)) in
       let pe = m.pos_emb.(pos.(i)) in
-      for j = 0 to m.cfg.emb_dim - 1 do
+      for j = 0 to m.cfg.Config.hidden_size - 1 do
         te.(j) <- te.(j) +. pe.(j)
       done;
       te)
@@ -92,7 +94,7 @@ let forward_batch ?(attn_mask : bool array array option = None) ?(pos_ids : int 
     [i+1] is the output of transformer block [i], pre-[ln_f]. *)
 let forward_states ?(attn_mask : bool array option = None) (m : t) (ids : int array) : mat list =
   let s = Array.length ids in
-  if s > m.cfg.context_length then invalid_arg "Gpt.forward_states: sequence exceeds context_length";
+  if s > Config.max_positions m.cfg then invalid_arg "Gpt.forward_states: sequence exceeds max_positions";
   let x = ref (embed m ids) in
   let states = ref [ !x ] in
   List.iter

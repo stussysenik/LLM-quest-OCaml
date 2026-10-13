@@ -29,26 +29,26 @@ let split_thirds_vec (v : Tensor.vec) : Tensor.vec * Tensor.vec * Tensor.vec =
   let part k = Array.init w (fun j -> v.((k * w) + j)) in
   (part 0, part 1, part 2)
 
-let layernorm_of (f : Safetensors.file) (prefix : string) : Norm.layernorm =
+let layernorm_of (f : Safetensors.file) (prefix : string) ~(eps : float) : Norm.layernorm =
   {
     Norm.scale = Safetensors.vec_of f (prefix ^ ".weight");
     shift = Safetensors.vec_of f (prefix ^ ".bias");
-    eps = 1e-5;
+    eps;
     eps_inside_sqrt = true (* HF/PyTorch convention: eps inside the sqrt *);
   }
 
 let load_gpt2 (path : string) : Gpt.t =
   let f = Safetensors.open_file path in
   let cfg = Config.gpt_config_124m in
-  let e = cfg.Config.emb_dim in
-  let n_heads = cfg.Config.n_heads in
+  let e = cfg.Config.hidden_size in
+  let n_heads = cfg.Config.num_heads in
   let tok_emb = Safetensors.mat_of f "transformer.wte.weight" in
   let pos_emb = Safetensors.mat_of f "transformer.wpe.weight" in
   let blocks =
-    List.init cfg.Config.n_layers (fun i ->
+    List.init cfg.Config.num_layers (fun i ->
         let p = Printf.sprintf "transformer.h.%d" i in
-        let ln1 = layernorm_of f (p ^ ".ln_1") in
-        let ln2 = layernorm_of f (p ^ ".ln_2") in
+        let ln1 = layernorm_of f (p ^ ".ln_1") ~eps:(Config.norm_eps cfg) in
+        let ln2 = layernorm_of f (p ^ ".ln_2") ~eps:(Config.norm_eps cfg) in
         let cq_w = Safetensors.mat_of f (p ^ ".attn.c_attn.weight") in
         let cq_b = Safetensors.vec_of f (p ^ ".attn.c_attn.bias") in
         let wq, wk, wv = split_thirds_mat cq_w in
@@ -69,9 +69,9 @@ let load_gpt2 (path : string) : Gpt.t =
                 d_out = e;
               };
             num_heads = n_heads;
-            head_dim = e / n_heads;
+            head_dim = Config.head_dim cfg;
             d_out = e;
-            ctx_len = cfg.Config.context_length;
+            ctx_len = Config.max_positions cfg;
           }
         in
         let ffn =
@@ -81,21 +81,24 @@ let load_gpt2 (path : string) : Gpt.t =
                 Attention.w = Safetensors.mat_of f (p ^ ".mlp.c_fc.weight");
                 b = Some (Safetensors.vec_of f (p ^ ".mlp.c_fc.bias"));
                 d_in = e;
-                d_out = 4 * e;
+                d_out = Config.ffn_inner cfg;
               };
             l2 =
               {
                 Attention.w = Safetensors.mat_of f (p ^ ".mlp.c_proj.weight");
                 b = Some (Safetensors.vec_of f (p ^ ".mlp.c_proj.bias"));
-                d_in = 4 * e;
+                d_in = Config.ffn_inner cfg;
                 d_out = e;
               };
-            activation = Norm.Gelu_new;
+            (* From the config, not hardcoded: an HF `gpt2` checkpoint is
+               `gelu_new` (see ROADMAP.md), the repo's own configs are
+               exact GELU. *)
+            activation = Norm.activation_of cfg;
           }
         in
         { Block.att; ln1; ln2; ffn })
   in
-  let final_ln = layernorm_of f "transformer.ln_f" in
+  let final_ln = layernorm_of f "transformer.ln_f" ~eps:(Config.norm_eps cfg) in
   let lm_head =
     {
       Attention.w = Safetensors.mat_of_transposed f "lm_head.weight";

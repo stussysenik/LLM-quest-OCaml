@@ -52,14 +52,21 @@ ocamlopt -I lib -o demo \
 - No tokenizer. Generation parity is gated on **token IDs**, not decoded
   text — the reference file carries the tokenized prompt, so both sides
   start from identical input.
-- Only the HF `gpt2` checkpoint is loaded; `Config.gpt_config_124m` and
-  the `transformer.h.N.*` naming map are the GPT-family specializations.
+
+`config.ml` carries both families in one record: shared fields at the
+top level, everything that differs behind `arch` (`Gpt2` / `Llama`).
+Code that needs a shape reads an accessor — `Config.max_positions`,
+`norm_eps`, `ffn_inner`, `kv_heads`, `head_dim`, `has_learned_positions`
+— so shared code (block stack, attention, cache, loader) never matches
+on family. Llama-only knobs (`rope_theta`, `rope_scaling`,
+`tie_word_embeddings`) raise on a GPT-2 config rather than returning a
+plausible-looking default.
 
 ## Running everything
 
-`make ci` is the one-command green-tree proof: 45 unit gates + 14
+`make ci` is the one-command green-tree proof: 60 unit gates + 14
 PyTorch parity stages + a 12-layer KV cross-check + 5 generation gates,
-about 1m45s on one CPU core.
+about two minutes on one CPU core.
 
 ```bash
 cd ocaml && make ci
@@ -81,10 +88,9 @@ would silently invalidate them and look like a phantom regression.
 
 ## Roadmap
 
-1. `config.ml` → model family; `test/parity.ml` → parameterized harness;
-   `hf_loader.ml` → shared `safetensors.ml` + per-family loaders.
-2. Llama deltas, each gated in isolation: RMSNorm → SwiGLU → RoPE → GQA.
-3. Llama full parity on `hf-internal-testing/tiny-random-LlamaForCausalLM`,
-   then greedy generation parity.
-4. Tokenizer (deferred — not on the critical path for model correctness).
-5. MoE / GRPO.
+Full gate sequence in `ROADMAP.md`. Next: parameterize the parity
+harness, split the loader, then the Llama deltas — RMSNorm, SwiGLU, RoPE
+(base + `llama3` scaling), GQA — each gated in isolation before
+composition, then 14-stage parity on `tiny-random-LlamaForCausalLM`.
+Real Llama-3.2-1B weights are an optional final check, not a
+prerequisite.
