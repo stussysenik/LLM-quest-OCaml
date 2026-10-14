@@ -36,14 +36,51 @@ LLAMA_MODEL = "hf-internal-testing/tiny-random-LlamaForCausalLM"
 HEAD_KEY = "lm_head.weight"
 
 
+def force_fp64_reference(model):
+    """Neutralise HF's internal fp32 downcasts for the duration of the export.
+
+    Casting the model to float64 is not enough on its own. `LlamaRMSNorm`
+    hard-casts inside its own forward:
+
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        ...
+
+    so every norm is still computed in fp32 no matter what dtype the model
+    is in, and the "float64 reference" carries an fp32 island. Measured on
+    tiny-random-Llama, that island is worth 1.26e-09 at block_0, 1.87e-07
+    at block_1 and 2.20e-08 at the logits — the same three numbers the
+    OCaml gate reported before this was patched, which is how it was
+    identified. HF's eager attention also pins its softmax to float32, but
+    measuring that separately showed it contributes exactly 0.0 here.
+
+    This is not a change to the model — it is the same arithmetic at the
+    precision the OCaml port claims. It has to happen at export time,
+    because the alternative is a gate calibrated to ~1e-7 that silently
+    measures HF's dtype choices rather than our kernels.
+    """
+    from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
+    def fp64_forward(self, hidden_states):
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        return self.weight * hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+
+    LlamaRMSNorm.forward = fp64_forward
+    return model
+
+
 def load_gpt2(prompt):
-    model = GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
+    model = pinned.align_parameters(
+        GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
+    )
     tok = GPT2Tokenizer.from_pretrained("gpt2", revision=pinned.GPT2_REVISION)
     return model, tok(prompt, return_tensors="pt").input_ids
 
 
 def load_llama(prompt):
-    model = AutoModelForCausalLM.from_pretrained(LLAMA_MODEL, revision=pinned.LLAMA_REVISION).eval()
+    model = pinned.align_parameters(
+        AutoModelForCausalLM.from_pretrained(LLAMA_MODEL, revision=pinned.LLAMA_REVISION).eval()
+    )
     tok = AutoTokenizer.from_pretrained(LLAMA_MODEL, revision=pinned.LLAMA_REVISION)
     return model, tok(prompt, return_tensors="pt").input_ids
 
@@ -95,18 +132,36 @@ def probe_convention(model, hidden_states, logits):
 
 
 def export(model, ids, out_path, drop_head=False):
+    # Weights stay float32 — they are exactly what the checkpoint holds, and
+    # the OCaml loaders assert F32 shapes against it.
+    tensors = {k: v.cpu().clone().contiguous() for k, v in model.state_dict().items()}
+    tensors["ref.input_ids"] = ids[0].cpu().clone()
+
+    # Reference activations are computed in float64. The gate's tolerance is
+    # bounded by the *less precise* of the two implementations, and fp32 is
+    # not the bottleneck-free side: GPT-2's ~3000-magnitude outlier dims
+    # mean a 12-layer fp32 run disagrees with the same run in fp64 by ~2e-6
+    # relative. Gating a faithful fp64 OCaml port at 1e-6 against that would
+    # measure PyTorch's rounding (and shift with the host's BLAS), so the
+    # reference is produced at the precision we are actually claiming.
+    # Both sides then sum in fp64 from bit-identical inputs; what remains is
+    # summation order, ~1e-14 relative.
+    model = model.double()
+    model = force_fp64_reference(model)
     with torch.no_grad():
         out = model(ids, output_hidden_states=True)
 
     layers = model.config.num_hidden_layers
     post_norm = probe_convention(model, out.hidden_states, out.logits)
 
-    tensors = {k: v.cpu().clone().contiguous() for k, v in model.state_dict().items()}
-    tensors["ref.input_ids"] = ids[0].cpu().clone()
     for i in range(layers):
         tensors[f"ref.hidden.{i}"] = out.hidden_states[i][0].cpu().clone().contiguous()
     tensors[f"ref.hidden.{layers}"] = out.hidden_states[post_norm][0].cpu().clone().contiguous()
     tensors["ref.logits"] = out.logits[0].cpu().clone().contiguous()
+    print(
+        "reference dtypes: weights F32 (as checkpointed), activations "
+        f"{out.logits.dtype} — see safetensors.ml mat_of_f64"
+    )
 
     # Tied embeddings: the head shares storage with embed_tokens/wte, so
     # state_dict() carries both keys and the file has both too. The loader

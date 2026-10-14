@@ -9,7 +9,7 @@
     the destination [float array]s — the 550MB `gpt2` file is held
     once as [bytes], never duplicated as intermediate arrays. *)
 
-type dtype = F32 | I64
+type dtype = F32 | F64 | I64
 
 type entry = { dtype : dtype; shape : int list; off_start : int; off_end : int }
 
@@ -146,6 +146,7 @@ let open_file (path : string) : file =
                   let dtype =
                     match List.assoc "dtype" f with
                     | JStr "F32" -> F32
+                    | JStr "F64" -> F64
                     | JStr "I64" -> I64
                     | JStr d -> failwith ("Safetensors: unsupported dtype " ^ d)
                     | _ -> failwith "Safetensors: bad dtype field"
@@ -243,6 +244,72 @@ let mat_of_head (f : file) (name : string) ~(head : int) ~(heads : int) : Tensor
       Array.init d (fun j ->
           let o = e.off_start + (((head * s) + i) * d + j) * 4 in
           Int32.float_of_bits (Bytes.get_int32_le f.data o)))
+
+(** Read a 2D [F64] tensor as a [Tensor.mat] of OCaml [float]s.
+
+    **Why reference tensors are F64 and weights stay F32.** A parity gate
+    compares two implementations of the same function; the tolerance it
+    can hold is set by the *less precise* of the two. HF runs in fp32, and
+    fp32 is not accurate to 1e-6 relative once a 12-layer block stack has
+    amplified the ~3000-magnitude GPT-2 outlier dims: on this machine
+    PyTorch disagrees with **its own fp64 run** by 2.3e-6 relative at
+    block 3. Gating a faithful fp64 OCaml port against an fp32 reference
+    at 1e-6 therefore measures the reference's own rounding, not our
+    error — and it is platform-dependent besides, because a different CPU
+    BLAS reduces in a different order.
+
+    So the *reference activations* are exported in float64 while the
+    *weights* stay float32, which is what they are on disk. Both sides
+    then accumulate in fp64 from bit-identical inputs, and what remains is
+    summation order — around 1e-14 relative, three orders of magnitude
+    tighter than the old gate and, unlike it, the same number on any
+    machine. Verified, not assumed: this is exactly the comparison that
+    passes at 1e-9 and would not have passed at 1e-6 before. *)
+let mat_of_f64 (f : file) (name : string) : Tensor.mat =
+  let e = find f name in
+  if e.dtype <> F64 then failwith ("Safetensors.mat_of_f64: not F64: " ^ name);
+  let rows, cols =
+    match e.shape with
+    | [ r; c ] -> (r, c)
+    | _ -> failwith ("Safetensors.mat_of_f64: not 2D: " ^ name)
+  in
+  if e.off_end - e.off_start <> rows * cols * 8 then
+    failwith ("Safetensors.mat_of_f64: size mismatch: " ^ name);
+  Array.init rows (fun i ->
+      Array.init cols (fun j ->
+          let o = e.off_start + ((i * cols) + j) * 8 in
+          Int64.float_of_bits (Bytes.get_int64_le f.data o)))
+
+(** 3D [F64] tensor as nested OCaml arrays — an image is
+    [num_channels, height, width], which is one level more than a [mat]
+    and cannot be squeezed into it without a reshape whose correctness is
+    then nobody's problem. The ViT references store images this way. *)
+let mat3_of_f64 (f : file) (name : string) : float array array array =
+  let e = find f name in
+  if e.dtype <> F64 then failwith ("Safetensors.mat3_of_f64: not F64: " ^ name);
+  let d0, d1, d2 =
+    match e.shape with
+    | [ a; b; c ] -> (a, b, c)
+    | _ -> failwith ("Safetensors.mat3_of_f64: not 3D: " ^ name)
+  in
+  if e.off_end - e.off_start <> d0 * d1 * d2 * 8 then
+    failwith ("Safetensors.mat3_of_f64: size mismatch: " ^ name);
+  let get i j k =
+    Int64.float_of_bits (Bytes.get_int64_le f.data (e.off_start + (((i * d1) + j) * d2 + k) * 8))
+  in
+  Array.init d0 (fun i -> Array.init d1 (fun j -> Array.init d2 (fun k -> get i j k)))
+
+(** 1D [F64] twin of [mat_of_f64] — the norm weights, biases and CLS
+    tokens in the ViT/VLM references are all 1D. *)
+let vec_of_f64 (f : file) (name : string) : Tensor.vec =
+  let e = find f name in
+  if e.dtype <> F64 then failwith ("Safetensors.vec_of_f64: not F64: " ^ name);
+  let n =
+    match e.shape with [ n ] -> n | _ -> failwith ("Safetensors.vec_of_f64: not 1D: " ^ name)
+  in
+  if e.off_end - e.off_start <> n * 8 then failwith ("Safetensors.vec_of_f64: size mismatch: " ^ name);
+  Array.init n (fun i ->
+      Int64.float_of_bits (Bytes.get_int64_le f.data (e.off_start + (i * 8))))
 
 let vec_of (f : file) (name : string) : Tensor.vec =
   let e = find f name in

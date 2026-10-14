@@ -61,11 +61,6 @@ let max_abs_diff_mat (a : Tensor.mat) (b : Tensor.mat) : float =
   done;
   !m
 
-let vec_max_abs (v : Tensor.vec) : float =
-  let m = ref 0.0 in
-  Array.iter (fun x -> m := max !m (abs_float x)) v;
-  !m
-
 let max_abs_diff_vec (a : Tensor.vec) (b : Tensor.vec) : float =
   if Array.length a <> Array.length b then failwith "test_mlp: vec length mismatch";
   let m = ref 0.0 in

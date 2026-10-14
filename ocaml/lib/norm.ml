@@ -21,9 +21,16 @@
     no shift, eps inside the sqrt" is what the name means and what
     [LlamaRMSNorm] does.
 
-    - [gelu]: exact erf version [x * 0.5 * (1 + erf(x / sqrt 2))].
-      OCaml stdlib has no [erf], so we use the Abramowitz & Stegun
-      7.1.26 approximation (max err ~1.5e-7). *)
+    - [gelu]: exact-erf version [x * 0.5 * (1 + erf(x / sqrt 2))].
+      OCaml's stdlib has no [erf], so [erf_approx] uses the
+      Abramowitz & Stegun 7.1.26 formula. **Its error is measured, not
+      assumed: 2.11e-07 absolute on GELU over [-12, 12],** which is the
+      reason the ViT gates that run GELU sit at 1e-6 rather than 1e-9
+      (the earlier "max err ~1.5e-7" note was the formula's own error
+      bound on erf, not on GELU, and understated it by ~40%). Gate V-g
+      pins the number so a change to the polynomial cannot make the
+      ViT tolerance quietly wrong. GPT-2 is unaffected: HF `gpt2` uses
+      `gelu_new`, whose tanh path does not call erf at all. *)
 
 open Tensor
 

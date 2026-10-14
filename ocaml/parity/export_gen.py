@@ -63,7 +63,9 @@ def manual_greedy(model, prompt_ids, n):
 
 
 def main(out_path, prompt=PROMPT, max_new_tokens=MAX_NEW_TOKENS):
-    model = GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
+    model = pinned.align_parameters(
+        GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
+    )
     tok = GPT2Tokenizer.from_pretrained("gpt2", revision=pinned.GPT2_REVISION)
     eos = tok.eos_token_id
     ids = tok(prompt, return_tensors="pt").input_ids

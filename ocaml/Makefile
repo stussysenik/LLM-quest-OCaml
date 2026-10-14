@@ -1,11 +1,28 @@
-LIB = lib/tensor.ml lib/config.ml lib/norm.ml lib/mlp.ml lib/kv_cache.ml lib/safetensors.ml lib/attention.ml lib/block.ml lib/sampling.ml lib/gpt.ml lib/llama.ml lib/gpt2_loader.ml lib/llama_loader.ml
-REF ?= /data/tmp/ocaml-parity/gpt2_ref.safetensors
-REF_KV ?= /data/tmp/ocaml-parity/gpt2_kv_ref.safetensors
-REF_GEN ?= /data/tmp/ocaml-parity/gpt2_gen_ref.safetensors
-REF_LLAMA ?= /data/tmp/ocaml-parity/llama_ref.safetensors
-REF_LLAMA_TIED ?= /data/tmp/ocaml-parity/llama_tied_ref.safetensors
-REF_NORM ?= /data/tmp/ocaml-parity/norm_ref.safetensors
-REF_MLP ?= /data/tmp/ocaml-parity/mlp_ref.safetensors
+# rope.ml precedes attention.ml: GroupedQueryAttention applies RoPE to Q/K
+# internally, matching llama_attention.py's forward(x, mask, cos, sin, ...).
+LIB = lib/tensor.ml lib/config.ml lib/norm.ml lib/mlp.ml lib/rope.ml lib/kv_cache.ml lib/safetensors.ml lib/attention.ml lib/block.ml lib/sampling.ml lib/gpt.ml lib/llama.ml lib/gpt2_loader.ml lib/llama_loader.ml lib/vit.ml lib/vlm.ml
+# Every reference file lives in one directory. Override it in one place
+# rather than per-file: the defaults point at /data/tmp, which is read-only
+# on macOS (SIP), so a fresh machine has to move the whole set anyway and
+# ten separate variables make that a ten-variable invocation.
+#
+#   make ci PARITY_DIR=/tmp/ocaml-parity
+#
+# The individual REF_* names below are still overridable (?=) for the rare
+# case of pointing one stage at a different export.
+PARITY_DIR ?= /data/tmp/ocaml-parity
+REF ?= $(PARITY_DIR)/gpt2_ref.safetensors
+REF_KV ?= $(PARITY_DIR)/gpt2_kv_ref.safetensors
+REF_GEN ?= $(PARITY_DIR)/gpt2_gen_ref.safetensors
+REF_LLAMA ?= $(PARITY_DIR)/llama_ref.safetensors
+REF_LLAMA_TIED ?= $(PARITY_DIR)/llama_tied_ref.safetensors
+REF_NORM ?= $(PARITY_DIR)/norm_ref.safetensors
+REF_MLP ?= $(PARITY_DIR)/mlp_ref.safetensors
+REF_ROPE ?= $(PARITY_DIR)/rope_ref.safetensors
+REF_ROPE_LLAMA3 ?= $(PARITY_DIR)/rope_llama3_ref.safetensors
+REF_GQA ?= $(PARITY_DIR)/gqa_ref.safetensors
+REF_VIT ?= $(PARITY_DIR)/vit_ref.safetensors
+REF_VLM ?= $(PARITY_DIR)/vlm_ref.safetensors
 # Parity is parameterized by family; the dispatch lives in test/parity.ml,
 # so a new family is a new loader + export script, not a new target.
 FAMILY ?= gpt2
@@ -30,6 +47,18 @@ test_norm: $(LIB) test/test_norm.ml
 test_mlp: $(LIB) test/test_mlp.ml
 	ocamlopt -I lib -o test_mlp $(LIB) test/test_mlp.ml
 
+test_rope: $(LIB) test/test_rope.ml
+	ocamlopt -I lib -o test_rope $(LIB) test/test_rope.ml
+
+test_gqa: $(LIB) test/test_gqa.ml
+	ocamlopt -I lib -o test_gqa $(LIB) test/test_gqa.ml
+
+test_vit: $(LIB) test/test_vit.ml
+	ocamlopt -I lib -o test_vit $(LIB) test/test_vit.ml
+
+test_vlm: $(LIB) test/test_vlm.ml
+	ocamlopt -I lib -o test_vlm $(LIB) test/test_vlm.ml
+
 demo: $(LIB) bin/main.ml
 	ocamlopt -I lib -o demo $(LIB) bin/main.ml
 
@@ -42,12 +71,20 @@ parity_kv: $(LIB) test/parity_kv.ml
 parity_gen: $(LIB) test/parity_gen.ml
 	ocamlopt -I lib -o parity_gen $(LIB) test/parity_gen.ml
 
-test: test_all test_batched test_kv test_loader test_norm test_mlp
+test: test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm
 	./test_all && ./test_batched && ./test_kv && ./test_loader $(REF_LLAMA) $(REF_LLAMA_TIED)
 	@test -f $(REF_NORM) || (echo "norm reference not found: $(REF_NORM) -- run: python ocaml/parity/export_norm.py $(REF_NORM)" && exit 1)
 	./test_norm $(REF_NORM)
 	@test -f $(REF_MLP) || (echo "mlp reference not found: $(REF_MLP) -- run: python ocaml/parity/export_mlp.py $(REF_MLP)" && exit 1)
 	./test_mlp $(REF_MLP)
+	@test -f $(REF_ROPE) || (echo "rope reference not found: $(REF_ROPE) -- run: python ocaml/parity/export_rope.py $(REF_ROPE)" && exit 1)
+	./test_rope $(REF_ROPE) $(REF_ROPE_LLAMA3)
+	@test -f $(REF_GQA) || (echo "gqa reference not found: $(REF_GQA) -- run: python ocaml/parity/export_gqa.py $(REF_GQA)" && exit 1)
+	./test_gqa $(REF_GQA)
+	@test -f $(REF_VIT) || (echo "vit reference not found: $(REF_VIT) -- run: python ocaml/parity/export_vit.py $(REF_VIT)" && exit 1)
+	./test_vit $(REF_VIT)
+	@test -f $(REF_VLM) || (echo "vlm reference not found: $(REF_VLM) -- run: python ocaml/parity/export_vlm.py $(REF_VLM)" && exit 1)
+	./test_vlm $(REF_VLM)
 
 demo-run: demo
 	./demo
@@ -66,21 +103,25 @@ parity-gen: parity_gen
 	@test -f $(REF_GEN) || (echo "gen reference not found: $(REF_GEN) -- run: python ocaml/parity/export_gen.py <out>" && exit 1)
 	./parity_gen $(REF) $(REF_GEN)
 
-# C5: --family llama must fail AT the step D boundary — weights load,
-# kernels do not exist. A gate that only checks the happy path cannot
-# tell "the loader is done and the kernels are not" from "nobody wrote
-# it": both look like a non-zero exit. So assert both halves — non-zero,
-# and the message names step D.
-parity-llama-boundary: parity_check
+
+# E1: --family llama must run the *real* forward now that D3/D4/D5 are
+# landed. Before step E it had to fail AT the step-D boundary, which was a
+# gate that the loader worked and the kernels did not. That gate is spent;
+# what replaces it checks the thing that actually matters — that the
+# llama path is not silently falling back to GPT-2 shapes or a stub, and
+# that its layout gate ran. A bare exit-0 would pass just as well for a
+# harness that quietly did nothing.
+parity-llama-forward: parity_check
 	@test -f $(REF_LLAMA) || (echo "llama reference not found: $(REF_LLAMA) -- run: python ocaml/parity/export_reference.py --family llama $(REF_LLAMA)" && exit 1)
 	@out=$$(./parity_check --family llama $(REF_LLAMA) 2>&1); status=$$?; \
-	if [ $$status -eq 0 ]; then echo "C5 FAIL: --family llama succeeded; it must stop at ROADMAP step D"; exit 1; fi; \
-	if ! echo "$$out" | grep -q "ROADMAP step D"; then echo "C5 FAIL: --family llama failed, but not at the step D boundary:"; echo "$$out"; exit 1; fi; \
-	echo "C5 boundary: --family llama loads weights, stops at ROADMAP step D"
+	if [ $$status -ne 0 ]; then echo "E1 FAIL: --family llama exited $$status"; echo "$$out"; exit 1; fi; \
+	echo "$$out" | grep -q "layout gate: llama linear weights are \[out, in\]" || { echo "E1 FAIL: llama layout gate did not run"; echo "$$out"; exit 1; }; \
+	echo "$$out" | grep -q "^logits .*OK$$" || { echo "E1 FAIL: no logits stage reached"; echo "$$out"; exit 1; }; \
+	echo "E1: --family llama runs the step-E forward (layout gate + logits stage)"
 
-ci: test parity parity-kv parity-gen parity-llama-boundary
+ci: test parity parity-kv parity-gen parity-llama-forward
 
 clean:
-	rm -f test_all test_batched test_kv test_loader test_norm test_mlp demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
+	rm -f test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
 
-.PHONY: all test demo-run parity parity-kv parity-gen parity-llama-boundary ci clean
+.PHONY: all test demo-run parity parity-kv parity-gen parity-llama-forward ci clean

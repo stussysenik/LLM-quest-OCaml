@@ -48,12 +48,37 @@ it with the next. `make ci` stays green after every row.
 | L | **Weight layout → `[out, in]` project-wide.** `Attention.linear.w` becomes `(out, in)`; `Tensor.linear_fwd` is the one linear op and has no layout parameter; `Gpt2_loader` transposes `Conv1D` from `(in, out)` at load; `Llama_loader` unchanged (already `nn.Linear` order) | ✅ GPT-2 parity **bit-identical** — every `max_abs_diff` unchanged to the digit, which is the proof the refactor computes the same function; from-scratch weights *and* logits bit-identical as well; new gate `layout_gpt2_out_in` / `layout_llama_out_in` re-derives each `out` from the config, covering the square projections shape assertions cannot |
 | D1 | RMSNorm | ✅ vs `LlamaRMSNorm` at hidden 16 **and** 2048 (3.3e-7 / 7.8e-7, dual abs+rel 1e-6); zero-mean identity vs LayerNorm exact (0.0); shift-sensitive where LayerNorm is shift-invariant; zero weight zeroes the output; eps placement changes the result (2.4e-6) both ways; `Config.norm_eps` family-specific (1e-6 Llama / 1e-5 GPT-2) and it is the value the op ran with. **13 gates**, each proved to bite by mutating the op |
 | D2 | SwiGLU | ✅ vs `LlamaMLP` at hidden 16/inter 64 and the square 256/256 (8.0e-7 / 1.8e-6, dual abs+rel 1e-5 — the reference is fp32; mid is square on purpose so a transposed `down_proj` fails *silently* rather than raising); zero input zeroes the op and not the GPT-2 FFN (no bias); up path load-bearing; silu stable (naive sigmoid caught at -710); `Config.ffn_inner` is `intermediate_size` (128 ≠ 4×64 on tiny_test) and is the shape D2a's weights were checked against; GELU-on-the-gate changes the function. **19 gates**, all six mutations ran against the committed gates — each bites its own gate |
-| D3 | RoPE, base | relative-position invariance `q·k(i,j) == q·k(i+d,j+d)`; direct vs `apply_rotary_pos_emb`; cached-at-pos-p ≡ full-forward row p |
-| D4 | RoPE, `llama3` scaling | vs `_compute_llama3_parameters` on the frequency table alone, before any attention |
-| D5 | GQA | vs `LlamaAttention`; KV cache sized by `Config.kv_heads`, not `num_heads` |
-| E | tiny-random Llama parity | 14 stages against `hf-internal-testing/tiny-random-LlamaForCausalLM` |
+| D3 | RoPE, base | ✅ `lib/rope.ml`, `parity/export_rope.py`, `test/test_rope.ml`. D3a vs `RoPE.apply` (9.8e-8 / 8.6e-8 abs, fp32 ref); D3b relative-position invariance on the *same* q/k vectors at shifted positions (3.3e-16); D3c explicit 2D rotation matrix ≡ apply (exact); D3d `position_ids=[p]` ≡ full-forward row p (exact, 6.0e-8 vs ref). **9 gates**, 3 mutations run against them |
+| D4 | RoPE, `llama3` scaling | ✅ `compute_angles_llama3` vs `_compute_llama3_parameters` on the frequency table alone (2.7e-7 / 5.0e-7, fp32 ref); scaling provably non-identity (7.9e-4) and provably differs from base RoPE (4.6e-4). **4 gates** added, 13 total |
+| D5 | GQA | ✅ `parity/export_gqa.py`, `test/test_gqa.ml`, `GroupedQueryAttention` in `lib/attention.ml`. D5a vs `LlamaAttention` (eager), D5b vs this repo's own `llama_attention.py`; D5c the *anti*-gate — grouping is a permutation, so a repeat-tiling implementation must provably **disagree** (>1e-3) and the true one must be the closer match, which is the only gate that can catch an implementation that is accidentally right; D5d cache sized by `Config.kv_heads`, and a wide `num_heads` cache is **rejected** by both the cache constructor and `forward` rather than silently reshaped; D5e `num_repeat == 1` collapses GQA to plain MHA identically; D5f q/k/v carry no bias, `o_proj` does, and a zero bias ≡ no bias. **18 gates** |
+| E | tiny-random Llama parity | 🔶 E1 only — `parity-llama-forward` in `make ci` asserts `--family llama` exits 0 **and** that it printed the llama layout gate *and* that a logits stage reported OK, so a harness that quietly no-ops cannot pass. The remaining stages land after E |
 | F | Llama-3.2-1B parity | 14 stages on real weights — **optional**, see below |
-| G | Greedy generation parity | token-for-token vs `generate(do_sample=False)` |
+| G | Greedy generation parity | token-for-token vs `generate(do_sample=False)` — landed earlier as `parity_gen` (5 gates, cached + uncached paths both token-identical over 20 steps) |
+
+## Multimodality (Parts 1 & 2 of the quest)
+
+Same rule as above: each row gates the next, and every gate is checked
+against a PyTorch export before it is composed with anything.
+
+| Step | Piece | Gate |
+| :--- | :--- | :--- |
+| ViT | `lib/vit.ml` — patch embed, CLS token, learned position embedding, pre-norm encoder blocks, MHSA, MLP, layernorm, classification head | ✅ `parity/export_vit.py`, `test/test_vit.ml`. Every stage vs `vit_for_image_classification`; the CLS token is proven load-bearing (pooling the mean of patches diverges >1e-6) and `LayerNorm_make` defaults to eps-**outside**, the ViT convention. **25 gates** |
+| VLM | `lib/vlm.ml` — ViT→LLM adapter (2-layer MLP) + early fusion | ✅ `parity/export_vlm.py`, `test/test_vlm.ml`. Fusion is *placement*: 17 vision embeddings then 6 text, never appended; the attention mask is 17 vision ones ++ the text mask; the shift for next-token logits slices at `n_vit - 1`, and both the off-by-one and the append-instead-of-place variants are caught by anti-gates. **30 gates**, run at two widths (the reference config and a deliberately simple 32→48 adapter) |
+
+The VLM gates were mutation-tested as a batch — breaking early fusion four
+ways (skip the adapter, append instead of place, off-by-one slice, drop
+the vision mask) each takes `make ci` to exit 1. A gate set that has never
+been observed to fail is an assumption.
+
+**D3/D4's mutation table, all three run against the committed gates:**
+
+| Mutation | Caught by |
+|---|---|
+| `rotate_half` negation dropped | 7 gates (d3a/d3c/d3d, and the D4 tables inherit it) |
+| Halves convention → interleaved (`j mod half` → `j / 2`) | 3 gates — the classic RoPE convention bug, caught numerically by D3a |
+| llama3 smooth-interp terms swapped | `d4_cos` 3.8e-4, `d4_sin` 2.2e-2 against a 1e-5 gate |
+
+D3b was **wrong when first written** — it compared `q(i)` against `q(i+d)` from different random rows, which tests nothing. The reference implementation failed it too (1.5e+01), which is what identified it: relative-position invariance is a statement about *one* q and *one* k at shifted positions, not about two unrelated vectors. Worth recording because the failure mode is a gate that can only ever fail, which is the same as no gate.
 
 Steps A-E need no real weights: random tensors and the ~5MB
 tiny-random checkpoint. The tokenizer (Llama 3 tiktoken BPE) is a
@@ -179,3 +204,40 @@ separate `make ci-llama` target rather than the main `make ci`.
   is ~4e-4 absolute (~1e-7 relative). A flat 1e-5 absolute gate is
   miscalibrated there — and the numbers prove it rather than the
   implementation being wrong.
+- **Reference activations are float64; weights stay float32** (that is
+  what the checkpoints hold, and the loaders assert F32 against them).
+  This supersedes the paragraph above, and the reason is that the
+  criterion could not be calibrated by choosing a number.
+
+  The old gate compared a faithful fp64 OCaml port against an **fp32**
+  PyTorch reference at `rel_tol = 1e-6`, and breached at ~1.4e-6. The
+  tempting reading is "the port has a bug"; it did not. Measured on this
+  machine, PyTorch disagrees with **its own fp64 run** by 2.3e-6
+  relative at block 3 and 2.0e-6 at the logits. So the gate was
+  measuring the reference's rounding, and the number moves with the
+  host's CPU BLAS reduction order — the same class of problem as the CUDA
+  vs CPU torch note above, one level up.
+
+  With the reference exported in float64, both sides sum in fp64 from
+  bit-identical inputs and what remains is summation order:
+
+  | stage | before (fp32 ref) | after (fp64 ref) |
+  |---|---|---|
+  | embeddings | 9.9e-6 | **0.0 exactly** |
+  | block_0 | 3.5e-4 | 9.9e-14 |
+  | block_11_lnf | 3.6e-4 | 1.4e-13 |
+  | logits | 2.4e-4 | 1.7e-13 |
+
+  Every gate moved from 1e-6/1e-5 to **1e-9** — seven orders of magnitude
+  tighter than the gate it replaces, and now the same number on any
+  machine instead of a host-dependent one. The dual abs+rel criterion
+  survives; what changed is that the reference stopped being the least
+  accurate thing in the comparison.
+
+- **A gate that cannot fail is not a gate.** D3b was written wrong the
+  first time — it compared `q(i)` against `q(i+d)` from different random
+  rows, which is not the statement RoPE makes. It failed on the reference
+  implementation too (1.5e+01), which is what exposed it: the property is
+  about *one* q and *one* k at shifted positions. Kept here because the
+  failure mode — a gate that only ever fails — is indistinguishable from
+  no gate at all, and it is easy to write.

@@ -42,7 +42,9 @@ def check_pinned() -> None:
         (torch, "torch", TORCH_VERSION),
     ):
         found = module.__version__
-        if found != expected:
+        # The CPU index serves torch without the +cpu local-version suffix
+        # (e.g. "2.14.1" not "2.14.1+cpu"); accept either as the CPU build.
+        if found != expected and not (label == "torch" and found == TORCH_VERSION.removesuffix("+cpu")):
             raise RuntimeError(
                 f"{label} {found} != pinned {expected}.\n"
                 f"The committed references were generated with the pinned stack:\n  {banner()}\n"
@@ -50,3 +52,30 @@ def check_pinned() -> None:
                 f"from the CPU index) and re-export every reference file; do NOT regenerate\n"
                 f"just this one."
             )
+
+
+def align_parameters(module):
+    """Reallocate every parameter into 64-byte-aligned storage, in place.
+
+    HuggingFace loads safetensors through mmap. For `gpt2`, `lm_head.weight`
+    is tied to `wte.weight` and comes back with a data pointer that is *not*
+    64-byte aligned — `data_ptr() % 64 == 19` on this machine. torch's CPU
+    BLAS selects a vectorised GEMV path for single-token forwards that
+    requires aligned weights and dereferences it regardless, so the process
+    dies with SIGBUS (exit 138) instead of raising a Python exception.
+    That is why `export_gen.py` failed at the very first decode step while
+    the seq_len>=2 forwards that precede it all succeeded.
+
+    Cloning allocates fresh, aligned storage and copies the values across,
+    so the numbers are bit-identical and every committed reference stays
+    valid — only the address changes. This is an environment workaround, not
+    a change to the model, and it is applied at export time only: the OCaml
+    side never sees it.
+
+    Cheap insurance for any module loaded from a checkpoint; a no-op for
+    modules built in memory (already aligned).
+    """
+    with torch.no_grad():
+        for p in module.parameters():
+            p.data = p.data.clone()
+    return module

@@ -34,13 +34,6 @@ let eq_mat_exact (a : mat) (b : mat) : bool =
        (fun ra rb -> Array.length ra = Array.length rb && Array.for_all2 ( = ) ra rb)
        a b
 
-let max_abs_diff (a : mat) (b : mat) : float =
-  let m = ref 0.0 in
-  Array.iter2
-    (fun ra rb -> Array.iter2 (fun x y -> m := max !m (abs_float (x -. y))) ra rb)
-    a b;
-  !m
-
 let () =
   let rs = Random.State.make [| 2024 |] in
   let cfg = Config.gpt_tiny_test_config in

@@ -73,6 +73,14 @@ let rowvec_mul (x : vec) (w : mat) : vec =
     raises on any shape mismatch). *)
 let hadamard (a : mat) (b : mat) : mat = Array.map2 (fun ra rb -> Array.map2 ( *. ) ra rb) a b
 
+(** Elementwise sum of two same-shaped matrices. This is the residual
+    connection, and it is here rather than open-coded at each call site so
+    that "the two things being added have the same shape" is checked in one
+    place — a residual that silently truncates is exactly the kind of
+    bug that survives a parity gate on a square model and appears the day
+    someone changes a dimension. *)
+let add (a : mat) (b : mat) : mat = Array.map2 (fun ra rb -> Array.map2 ( +. ) ra rb) a b
+
 (** [linear_fwd (w (d_out x d_in)) (x (s x d_in)) (b : vec option)] =
     [x @ w^T + b] — the one linear op in this repo.
 

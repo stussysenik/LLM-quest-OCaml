@@ -23,6 +23,8 @@
     the convention stays [(out, in)] rather than being flipped to suit
     the embedding. *)
 
+open Tensor
+
 type layer = {
   q_proj : Tensor.mat; (** [heads * head_dim, hidden] *)
   k_proj : Tensor.mat; (** [kv_heads * head_dim, hidden] *)
@@ -71,3 +73,117 @@ let num_parameters (m : model) : int =
       0 m.layers
   in
   mat_count m.embed_tokens + layer + Array.length m.norm + mat_count m.lm_head
+
+(* ------------------------------------------------------------------ *)
+(* Forward pass (ROADMAP step E)                                       *)
+(* ------------------------------------------------------------------ *)
+
+(** Token ids → rows of [embed_tokens]. Llama has no positional table:
+    position enters through RoPE, not a learned embedding, so the lookup
+    is the whole "embedding" stage. The id is range-checked because an out
+    of range read here would be a silent out-of-bounds rather than an
+    error, and a token id past the vocabulary is exactly the kind of
+    input mistake that otherwise shows up 12 layers downstream as a
+    numerical breach. *)
+let embed (m : model) (ids : int array) : Tensor.mat =
+  let vocab = Array.length m.embed_tokens in
+  Array.map
+    (fun id ->
+      if id < 0 || id >= vocab then
+        invalid_arg (Printf.sprintf "Llama.embed: token id %d outside [0, %d)" id vocab);
+      Array.copy m.embed_tokens.(id))
+    ids
+
+(** The RoPE tables this model's config asks for. [rope_scaling = None]
+    means classic RoPE; [Llama3] is the step-D4 frequency scaling. Going
+    through [Config] rather than taking the factors as arguments is what
+    makes the config the single source of truth for all three. *)
+let rope_tables (m : model) : Tensor.mat * Tensor.mat =
+  let base = Config.rope_theta m.cfg in
+  let head_dim = Config.head_dim m.cfg in
+  let ctx_len = Config.max_positions m.cfg in
+  match Config.rope_scaling m.cfg with
+  | None -> Rope.compute_angles ~base ~head_dim ~ctx_len
+  | Some scaling -> Rope.compute_angles_llama3 ~base ~head_dim ~ctx_len ~scaling
+
+(** The [Attention.gqa] view of a layer's projections. No biases anywhere:
+    Llama's linears are bias-free ([Config.qkv_bias] is [false]), so every
+    [b] is [None] rather than a zero vector that would silently make the
+    kernels' bias argument look load-bearing. *)
+let gqa_of_layer (cfg : Config.t) (l : layer) : Attention.gqa =
+  let num_heads = cfg.num_heads in
+  let num_kv_groups = Config.kv_heads cfg in
+  let head_dim = Config.head_dim cfg in
+  let hidden = cfg.hidden_size in
+  let kv_width = num_kv_groups * head_dim in
+  {
+    Attention.w_q = { Attention.w = l.q_proj; b = None; d_in = hidden; d_out = num_heads * head_dim };
+    w_k = { Attention.w = l.k_proj; b = None; d_in = hidden; d_out = kv_width };
+    w_v = { Attention.w = l.v_proj; b = None; d_in = hidden; d_out = kv_width };
+    out_proj = { Attention.w = l.o_proj; b = None; d_in = num_heads * head_dim; d_out = hidden };
+    num_heads;
+    num_kv_groups;
+    head_dim;
+    d_out = hidden;
+  }
+
+let swiglu_of_layer (l : layer) : Mlp.swiglu =
+  { Mlp.gate_proj = l.gate_proj; up_proj = l.up_proj; down_proj = l.down_proj }
+
+(** One decoder block: pre-norm attention, residual, pre-norm SwiGLU,
+    residual. Both norms are *pre*-norm, which is why [x] is the residual
+    stream being added to rather than something recomputed. *)
+let block_forward (cfg : Config.t) (l : layer) (cos : mat) (sin : mat) ~positions (x : mat) : mat =
+  let eps = Config.norm_eps cfg in
+  let gqa = gqa_of_layer cfg l in
+  let normed = Norm.rms_norm l.input_norm ~eps x in
+  let attn = Attention.gqa_forward ~positions ~cos ~sin gqa normed in
+  let x1 = Tensor.add x attn in
+  let normed2 = Norm.rms_norm l.post_attn_norm ~eps x1 in
+  let mlp = Mlp.forward (swiglu_of_layer l) normed2 in
+  Tensor.add x1 mlp
+
+(** [forward_hidden_states ?positions m ids] returns [(states, logits)].
+
+    [states] has length [n_layers + 1] and uses the *same* convention as
+    [Gpt.forward_states], which is what lets the parity harness run one
+    stage loop for both families:
+
+    - [states.(0)] — the embedding output
+    - [states.(i)] for [1 <= i <= n_layers] — the raw output of block [i-1]
+
+    Note [states.(n_layers)] is the **raw** last-block output, *not* the
+    post-final-norm state. The harness applies the family's own
+    [final_norm] to it and compares the result against
+    [ref.hidden.{n_layers}], which the export identified as post-norm by
+    pairing each hidden state against the logits rather than assuming (see
+    [export_reference.py]'s [probe_convention]). The two are not
+    interchangeable: for GPT-2 the raw state has |x| ~ 3000 against the
+    normed state's ~170, so comparing the wrong pair is a 1e-2 breach
+    rather than a rounding difference.
+
+    [positions] is [None] for a plain prefill (positions [0..n-1]) and
+    [Some ps] when the ids sit at arbitrary absolute positions, which is
+    what a cached decode step needs. *)
+let forward_hidden_states ?(positions : int array option = None) (m : model) (ids : int array) :
+    mat array * mat =
+  let cfg = m.cfg in
+  let eps = Config.norm_eps cfg in
+  let cos, sin = rope_tables m in
+  let x0 = embed m ids in
+  let n_layers = List.length m.layers in
+  let states = Array.make (n_layers + 1) x0 in
+  let cur = ref x0 in
+  List.iteri
+    (fun i l ->
+      let next = block_forward cfg l cos sin ~positions !cur in
+      states.(i + 1) <- next;
+      cur := next)
+    m.layers;
+  let final_normed = Norm.rms_norm m.norm ~eps !cur in
+  let logits = Tensor.linear_fwd m.lm_head final_normed None in
+  (states, logits)
+
+(** The forward pass proper: logits for [ids]. *)
+let forward ?positions (m : model) (ids : int array) : mat =
+  snd (forward_hidden_states ?positions m ids)

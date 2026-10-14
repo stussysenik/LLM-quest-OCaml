@@ -139,20 +139,57 @@ let gpt2 : family =
         });
   }
 
-(** The Llama loader landed in ROADMAP step C and does run — but there
-    is no forward pass yet: RMSNorm (D1) and SwiGLU (D2) exist and are
-    gated in isolation, while RoPE (D3/D4) and GQA (D5) have not.
-    Weights load first so that reaching this message means the loader
-    worked on the real file; the boundary it reports is the kernels,
-    not the parsing. *)
+(** The Llama loader landed in ROADMAP step C and the kernels in D1-D5, so
+    the forward pass now exists: RMSNorm (D1), SwiGLU (D2), RoPE base and
+    llama3 scaling (D3/D4) and GQA (D5), each verified in isolation before
+    being composed here.
+
+    The layout gate is Llama's own rather than a reuse of GPT-2's, because
+    the two differ exactly where it matters: Llama's K/V projections are
+    [kv_heads * head_dim] wide, not [num_heads * head_dim]. Reusing the
+    GPT-2 expectations here would assert MHA shapes on a GQA model.
+
+    Note that tiny-random-LlamaForCausalLM has kv_heads == num_heads
+    (4/4), so this model has no GQA and the K/V width check cannot catch a
+    head-grouping bug — D5 does that, on 4 heads / 2 kv heads. A green
+    step E is not a green GQA. *)
+let check_llama_layout (m : Llama.model) =
+  let cfg = m.Llama.cfg in
+  let e = cfg.Config.hidden_size in
+  let hd = Config.head_dim cfg in
+  let q_dim = cfg.Config.num_heads * hd in
+  let kv_dim = Config.kv_heads cfg * hd in
+  let inter = Config.ffn_inner cfg in
+  List.iter
+    (fun (l : Llama.layer) ->
+      check_out_in "q_proj" l.Llama.q_proj ~d_out:q_dim ~d_in:e;
+      check_out_in "k_proj" l.Llama.k_proj ~d_out:kv_dim ~d_in:e;
+      check_out_in "v_proj" l.Llama.v_proj ~d_out:kv_dim ~d_in:e;
+      check_out_in "o_proj" l.Llama.o_proj ~d_out:e ~d_in:q_dim;
+      check_out_in "gate_proj" l.Llama.gate_proj ~d_out:inter ~d_in:e;
+      check_out_in "up_proj" l.Llama.up_proj ~d_out:inter ~d_in:e;
+      check_out_in "down_proj" l.Llama.down_proj ~d_out:e ~d_in:inter)
+    m.Llama.layers;
+  check_out_in "embed_tokens" m.Llama.embed_tokens ~d_out:cfg.Config.vocab_size ~d_in:e;
+  check_out_in "lm_head" m.Llama.lm_head ~d_out:cfg.Config.vocab_size ~d_in:e
+
 let llama : family =
   {
     name = "llama";
     load =
       (fun path ->
-        let _weights = Llama_loader.load (Safetensors.open_file path) Config.llama_tiny_random_config in
-        failwith
-          "Parity: --family llama loads its weights, but the forward pass needs ROADMAP step D (D3/D4 RoPE, D5 GQA; D1 RMSNorm and D2 SwiGLU are done)");
+        let m = Llama_loader.load (Safetensors.open_file path) Config.llama_tiny_random_config in
+        check_llama_layout m;
+        Printf.printf "layout gate: llama linear weights are [out, in]\n";
+        let n_layers = List.length m.Llama.layers in
+        let eps = Config.norm_eps m.Llama.cfg in
+        {
+          n_layers;
+          states = (fun ids -> Array.to_list (fst (Llama.forward_hidden_states m ids)));
+          final_norm = (fun x -> Norm.rms_norm m.Llama.norm ~eps x);
+          logits = (fun ids -> Llama.forward m ids);
+          final_norm_label = Printf.sprintf "block_%d_lnf" (n_layers - 1);
+        });
   }
 
 let families = [ gpt2; llama ]
@@ -178,9 +215,9 @@ let load_reference (path : string) ~n_layers : reference =
   let ids64 = Safetensors.i64_array_of f "ref.input_ids" in
   let ids = Array.map Int64.to_int ids64 in
   let hiddens =
-    List.init (n_layers + 1) (fun i -> Safetensors.mat_of f (Printf.sprintf "ref.hidden.%d" i))
+    List.init (n_layers + 1) (fun i -> Safetensors.mat_of_f64 f (Printf.sprintf "ref.hidden.%d" i))
   in
-  let logits = Safetensors.mat_of f "ref.logits" in
+  let logits = Safetensors.mat_of_f64 f "ref.logits" in
   { ids; hiddens; logits }
 
 (* ------------------------------------------------------------------ *)
@@ -220,16 +257,16 @@ let run ~(family : family) (path : string) : int =
           Printf.printf "    [%d,%d] ours=%.6e ref=%.6e diff=%.3e\n" i j o r d)
         (top_diffs ours refm)
   in
-  gate "embeddings" (List.nth states 0) (List.nth reference.hiddens 0) 1e-6 1e-6;
+  gate "embeddings" (List.nth states 0) (List.nth reference.hiddens 0) 1e-9 1e-9;
   List.iteri
     (fun i st ->
       if i > 0 && i < n_layers then
-        gate (Printf.sprintf "block_%d" (i - 1)) st (List.nth reference.hiddens i) 1e-3 1e-6)
+        gate (Printf.sprintf "block_%d" (i - 1)) st (List.nth reference.hiddens i) 1e-9 1e-9)
     states;
   (* ref.hidden.{n_layers} is the post-final-norm state (see header). *)
   let final_normed = model.final_norm (List.nth states n_layers) in
-  gate model.final_norm_label final_normed (List.nth reference.hiddens n_layers) 1e-3 1e-5;
-  gate "logits" logits reference.logits 1e-4 1e-5;
+  gate model.final_norm_label final_normed (List.nth reference.hiddens n_layers) 1e-9 1e-9;
+  gate "logits" logits reference.logits 1e-9 1e-9;
   !failures
 
 let () =

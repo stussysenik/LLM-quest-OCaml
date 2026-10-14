@@ -1,3 +1,4 @@
 (library
  (name llm_quest)
- (modules config tensor norm mlp kv_cache safetensors attention block gpt sampling llama gpt2_loader llama_loader))
+ (wrapped false)
+ (modules config tensor norm mlp kv_cache safetensors attention block gpt sampling llama gpt2_loader llama_loader rope vit vlm))

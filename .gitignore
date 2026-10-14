@@ -201,6 +201,10 @@ ocaml/test_kv
 ocaml/test_loader
 ocaml/test_norm
 ocaml/test_mlp
+ocaml/test_rope
+ocaml/test_gqa
+ocaml/test_vit
+ocaml/test_vlm
 ocaml/demo
 ocaml/parity_check
 ocaml/parity_kv

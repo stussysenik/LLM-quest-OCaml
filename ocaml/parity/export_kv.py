@@ -26,7 +26,9 @@ pinned.check_pinned()
 
 
 def main(out_path, prompt="Hello world", extra=2):
-    model = GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
+    model = pinned.align_parameters(
+        GPT2LMHeadModel.from_pretrained("gpt2", revision=pinned.GPT2_REVISION).eval()
+    )
     tok = GPT2Tokenizer.from_pretrained("gpt2", revision=pinned.GPT2_REVISION)
     ids = tok(prompt, return_tensors="pt").input_ids
     print(pinned.banner())

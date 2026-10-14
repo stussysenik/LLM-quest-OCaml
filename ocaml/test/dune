@@ -1,3 +1,3 @@
 (executables
- (names test_all test_batched test_kv test_loader test_norm test_mlp parity parity_kv parity_gen)
+ (names test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm parity parity_kv parity_gen)
  (libraries llm_quest))

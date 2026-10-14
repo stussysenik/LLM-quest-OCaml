@@ -70,12 +70,19 @@ let embed_batch ?(pos_ids : int array array option = None) (m : t) (bids : int a
 let mask_of_batch (attn_mask : bool array array option) (i : int) : bool array option =
   match attn_mask with None -> None | Some ms -> Some ms.(i)
 
-(** Shared trunk: blocks + final LN + head, on pre-embedded input. *)
-let forward_from_emb ?(attn_mask : bool array option = None) (m : t) (emb : mat) : mat =
+(** Shared trunk: blocks + final LN on pre-embedded input — everything
+    between an embedding matrix and the language head. Split out of
+    [forward_from_emb] because early fusion needs to stop here: a VLM
+    inspects the fused hidden states (vision + text, post-trunk) without
+    paying for a [seq x vocab] projection. *)
+let trunk_from_emb ?(attn_mask : bool array option = None) (m : t) (emb : mat) : mat =
   let x = ref emb in
   List.iter (fun blk -> x := Block.block_forward ~attn_mask blk !x) m.blocks;
-  let h = Norm.layer_norm m.final_ln !x in
-  Attention.linear_forward_batch m.lm_head h
+  Norm.layer_norm m.final_ln !x
+
+(** Shared trunk + head, on pre-embedded input. *)
+let forward_from_emb ?(attn_mask : bool array option = None) (m : t) (emb : mat) : mat =
+  Attention.linear_forward_batch m.lm_head (trunk_from_emb ~attn_mask m emb)
 
 let forward ?(attn_mask : bool array option = None) (m : t) (ids : int array) : mat =
   forward_from_emb ~attn_mask m (embed m ids)
