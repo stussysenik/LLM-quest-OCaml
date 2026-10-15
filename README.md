@@ -144,3 +144,21 @@ or
 ```bash
 uv sync
 ```
+---
+
+## OCaml port (`ocaml/`)
+
+A pure-stdlib OCaml re-implementation of the GPT-2 → Llama 3.2 path and
+the multimodal (ViT + VLM) work, parity-verified against PyTorch at
+**1e-9**. No Owl, no torch bindings — every op spelled out.
+
+```bash
+cd ocaml && make ci        # 269 PASS across 14 suites, ~2 min
+```
+
+- [`ocaml/README.md`](ocaml/README.md) — layout, build, how to regenerate
+  the references
+- [`ocaml/ROADMAP.md`](ocaml/ROADMAP.md) — the gate ledger, every
+  mutation table, and what is explicitly **out of scope**
+- [`ocaml/STUDY.md`](ocaml/STUDY.md) — the twelve decisions that were
+  expensive here, each with the failure that motivated it

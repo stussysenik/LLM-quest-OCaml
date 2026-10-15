@@ -1,19 +1,45 @@
-# Active Goal
+# GOALS — session log for the OCaml port
 
-## ACTIVE
-- **goal**: The OCaml port covers the whole multimodality part of LLM Quest — ViT (Part 1) and the VLM (Part 2: ViT-LLM adapter + early fusion) are implemented in pure OCaml and parity-verified against the PyTorch reference, with `make ci` green.
-- **success criteria**:
-  - [x] `cd ocaml && make ci` exits 0 — verified this session, but only with `PARITY_DIR=/tmp/ocaml-parity`; the Makefile's default `/data/tmp/ocaml-parity` is read-only on this machine (SIP), which the Makefile header already documents. A bare `make ci` fails at `test_loader` on a missing reference, not on a gate.
-  - [x] `ocaml/lib/vit.ml` exists and implements patch embedding, CLS token, positional encoding, full attention, and classification head
-  - [x] `ocaml/test/test_vit.ml` passes all gates (ViT parity vs PyTorch reference) — 25/25
-  - [x] `ocaml/parity/export_vit.py` exists and produces `ocaml/parity/vit_ref.safetensors` (reference present at `/tmp/ocaml-parity/vit_ref.safetensors`)
-  - [x] `ocaml/lib/vlm.ml` exists and implements the ViT-LLM adapter and early fusion (image + text embeddings), and is listed in `ocaml/lib/dune`
-  - [x] `ocaml/parity/export_vlm.py` exists and, run against the pinned venv, writes `vlm_ref.safetensors` containing adapter, projected-image, and fused-embedding tensors
-  - [x] the VLM reference file exists on disk with non-zero size (`/tmp/ocaml-parity/vlm_ref.safetensors`, 1.7 MB, 169 tensors; `$(PARITY_DIR)`, like every other reference — no `.safetensors` is tracked in git)
-  - [x] `ocaml/test/test_vlm.ml` exists, is wired into `ocaml/Makefile`'s CI suite, and every gate it reports is PASS (no FAIL/ERROR lines in `make ci` output) — 30/30, `make ci` exit 0
-  - [x] VLM gates are mutation-tested: deliberately breaking early fusion (e.g. appending image embeddings instead of placing them, or skipping the adapter) makes `test_vlm` FAIL; the mutation is then reverted — 4 mutations, each caught with exit 1
-- **started**: 2026-10-13
-- **next action**: Multimodal Part 2 is complete and every criterion above is met — the stated goal is satisfied. Remaining, in priority order: (1) a durable-erf `Norm.erf_approx` replacement (measured 2.11e-07, the port's only numerical approximation, currently gated at 1e-6 rather than the exact-path 1e-9); (2) the untracked build artifacts `ocaml/test_gqa` `test_rope` `test_vit` `test_vlm` are not covered by a `.gitignore` and show up in `git status`; (3) commit the working tree if the user wants the port landed.
+## DONE — multimodality complete, env restored, `make ci` green
+
+The goal below was met and then extended. Current state, measured:
+
+- `cd ocaml && make ci` exits 0 — **269 PASS across 14 suites**, from a
+  clean tree, on the pinned venv at `/data/tmp/venv`
+  (torch 2.14.1+cpu, transformers 5.19.0, safetensors 0.8.0;
+  `pinned.check_pinned()` passes).
+- `PARITY_DIR` is back to the Makefile default `/data/tmp/ocaml-parity`
+  and works as-is. **The `PARITY_DIR=/tmp/...` override and the "SIP
+  makes /data read-only" note are obsolete** — that was a macOS machine.
+  This one is Linux, `/data` is writable (141 GB free), and `/tmp` does
+  not survive between sessions. All 12 references were re-exported
+  fp64-current under `/data/tmp/ocaml-parity`.
+- Toolchain is **OCaml 4.14.1, not 5.5.1**, and **dune is not
+  installed**. The Makefile is the real build (`ocamlopt` directly) and
+  the whole suite compiles warning-free under 4.14.1 — so `dune build`,
+  last fixed on 2026-10-14, is *unverified here* rather than known-broken.
+  Nothing in `make ci` depends on dune.
+
+What this pass added on top of the original multimodality goal:
+
+- `lib/vit_loader.ml`, `lib/gpt_repo_loader.ml`, `lib/vlm_loader.ml` —
+  the models could be *gated* but not *loaded*; now they read a real
+  fused checkpoint. 26 gates.
+- `lib/image.ml` — `to_tensor` and ImageNet `normalize` bit-identical to
+  torch, `resize_bilinear` at 2.22e-16 (not torchvision's antialias).
+  17 gates.
+- Vision-prefix KV cache + `Vlm.generate_cached` — linear instead of the
+  reference's per-step quadratic re-forward. 6 gates.
+- `lib/loss.ml`, `Vlm.vlm_loss`, `Vit.batch_loss`/`batch_accuracy`.
+  27 gates.
+- `Norm.erf` replacing Abramowitz & Stegun 7.1.26: 2.11e-07 → 1.11e-15
+  on erf. Six gates moved 1e-6 → 1e-9.
+- `STUDY.md` — twelve transferable patterns with the failure that
+  motivated each.
+- ROADMAP rows E/F/G corrected; the multimodality section gained M1–M4;
+  an explicit "Out of scope" section now records step F and the twelve
+  unported `llm_quest` packages, so a green roadmap is not read as a
+  finished port.
 
 ## LOG
 
@@ -51,4 +77,61 @@
 - 2026-10-14: `dune build` was dead before this session and is now green (exit 0). Two causes: `lib/dune` wrapped the library, so every test's `open Tensor` failed as "Unbound module Tensor" — added `(wrapped false)`, which is plainly the intent since the Makefile compiles the same files unwrapped. Then three dead bindings surfaced as warnings-as-errors under dune's dev profile: unused `max_abs_diff` in `test_batched.ml`, unused `vec_max_abs` in `test_mlp.ml`, and an unused `sin_base` from a tuple destructure in `test_rope.ml`. All three removed; `make ci` re-verified green afterwards (199 PASS, exit 0) since those test files changed.
 - 2026-10-15: Session closed out at the user's request: **all of D3, D4, D5, ViT, VLM and E1 landed** as one commit `7290c0a` ("ocaml: RoPE, GQA, and the vision half of the quest"), pushed `799052f..7290c0a` to `origin/master`. Re-verified green from the committed tree before pushing: `make ci PARITY_DIR=/tmp/ocaml-parity` exit 0 (42 + 9 + 9 + 16 + 13 + 19 + 13 + 18 + 25 + 30 + 5 gates, gpt2 + kv parity, llama forward E1). Two loose ends closed in the same commit: the four new build products (`test_rope`, `test_gqa`, `test_vit`, `test_vlm`) were untracked and un-ignored, so `.gitignore` gained them; and `ROADMAP.md` still showed D5/E/G as pending plus had no multimodality section at all, so those rows were filled in from the measured gate counts.
 - 2026-10-15: Left uncommitted on purpose: `.opencode/GOALS.md` — this file. It is agent-local session state, not part of the port; say the word if it should be tracked or gitignored instead.
-
+- 2026-10-15: **Environment rebuilt from scratch.** The pinned venv had
+  lived in `/tmp` and was gone. Rebuilt at `/data/tmp/venv` (build log:
+  `/tmp/venv-build.log`); `pinned.check_pinned()` passes. All 12
+  references re-exported fp64-current — the previous set in
+  `/data/tmp/ocaml-parity` was pre-fp64-calibration F32, so `make parity`
+  died on `mat_of_f64: not F64`. Baseline restored: `make ci` 199 PASS.
+- 2026-10-15: **`Norm.erf_approx` replaced.** A&S 7.1.26 measured
+  2.11e-07 on GELU — the port's one approximation and the stated reason
+  six gates sat at 1e-6. Now a Maclaurin series below 2 and an `erfc`
+  continued fraction above: **1.11e-15** on erf, 1.33e-15 on GELU, over
+  5501 samples on [-12,115] against `math.erf`. All six GELU gates to
+  1e-9, measuring 3e-16. Two bugs found by measuring rather than
+  reasoning: a Lentz loop that double-inverted `d`, and a series
+  recurrence starting at n=1 when term_1 needs n=0's ratio (the second
+  was visible as 5.4e-2 at x=0.9975, just below the split).
+- 2026-10-15: **V-g retightened** 2.2e-7 → 1e-13. At the old bound it
+  measured 2.2e-16 and would have passed on the A&S polynomial swapped
+  straight back in — the "gate that cannot fail" shape, found for the
+  fourth time. Mutation-verified: the swap makes V-g fail at 2.077e-07
+  and breaches all four V-f gates (20 passed/5 failed), then restores to
+  25/25.
+- 2026-10-15: **Loaders.** Three naming schemes now coexist: HF gpt2
+  (`Gpt2_loader`), HF Llama (`Llama_loader`), and the repo's own
+  `GPTModel` (`Gpt_repo_loader`, new). The fused checkpoint's `gpt.`
+  half needs the third because `vlm_training.py` builds the decoder from
+  `llm_quest.gpt.GPTModel`.
+- 2026-10-15: **Five facts only a real `state_dict` revealed** — adapter's
+  second Linear at `Sequential` index **3** not 2 (the dropout slot sits
+  there even as an `Identity`, and nothing in the gap has parameters);
+  adapter linears are `bias=False`; `GPTModel.out` is `bias=False` while
+  every other Linear is not; `att.mask` is a **bool** buffer (BOOL dtype
+  support added — the reader could not open a real file at all); and that
+  mask stores `triu(ones, diagonal=1)`, so **1 means masked**, the inverse
+  of the port's own `attn_mask`. Also: `assert_exact_keys ~skip_prefix:""`
+  filtered out *every* key, since every string starts with "".
+- 2026-10-15: **Image preprocessing.** `to_tensor` and ImageNet
+  `normalize` bit-identical to torch; `resize_bilinear` at 2.22e-16
+  against `interpolate(align_corners=False)`. torchvision was *not*
+  installed: 0.29.1 is ABI-incompatible with torch 2.14.1
+  (`operator torchvision::nms does not exist`), and installing it risked
+  the pin, so the resize gate targets torch's resampler and says so.
+- 2026-10-15: **The expensive bug: `input_embedded=True` adds no
+  positional embedding.** `GPTModel.forward`'s `x = x + pos_emb` is
+  *inside* `if not input_embedded:`. Adding positions measures
+  **1.36e-01** (rel ~1e-2) against the reference's logits — enough to
+  wreck a caption, far too small for any structural check to notice.
+  Found by running gate G-a after the code had been written to match the
+  wrong model. Consequence recorded in `gpt.ml`: the reference's trained
+  text carries baked-in positions while its *generated* tokens carry
+  none. Mirrored, not fixed.
+- 2026-10-15: **Two fake gates caught in my own new code** before
+  committing: an L5 mask anti-gate that only re-asserted a helper's
+  existence (replaced with a real byte-level corruption of the file), and
+  an L-h accumulator gate written `near x y && not (near x y)`, which is
+  always false. The L-h comment also claimed count-weighting the code did
+  not do — the reference averages per-batch means and does *not*
+  reweight by example count, so the comment now says that instead.
+- 2026-10-15: `make ci` **269 PASS** across 14 suites, exit 0.

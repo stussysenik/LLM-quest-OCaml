@@ -17,12 +17,39 @@ The governing rule, from the review that set this order:
 At that commit these tests proved **self-consistency only**. Steps 1-6
 below replaced that with PyTorch parity.
 
-## Deliberate simplifications (unverified / missing)
+## Deliberate simplifications
 
-- Dropout is identity at inference (matches all shipped configs: `0.0`)
-- No tokenizer — generation parity is gated on token IDs, which is the
-  part the model owns
-- `gpt2` (HF `gpt2`) only; the Llama family is the next port
+Stated as *what the port does not do*, with the reason, so each one can be
+revisited rather than rediscovered.
+
+- **Dropout is identity at inference.** Every shipped config sets `0.0`,
+  and the reference exports run under `.eval()`.
+- **No tokenizer.** Generation parity is gated on token IDs, which is the
+  part the model owns; `Vlm.generate_cached` returns ids for the same
+  reason.
+- **No training.** No optimizers, LR schedules, AMP, gradient clipping,
+  checkpoints written. `llm_quest`'s `*_training.py` scripts and
+  `vit_engine.vit_training_eval_loop` / `vlm_engine.vlm_training_loop_simple`
+  are out of scope. What *is* ported is the measurement side
+  (`lib/loss.ml`, `Vlm.vlm_loss`, `Vit.batch_loss`), because a loss you
+  cannot evaluate is a loss you cannot tell you got right.
+- **Image resize is not torchvision's.** `lib/image.ml` implements
+  `to_tensor` and ImageNet `normalize` exactly (both **bit-identical** to
+  torch) and `resize_bilinear` at torch's `interpolate(align_corners=False)`
+  sample positions (2.22e-16). `vlm_generation.py` calls
+  `torchvision.transforms.functional.resize`, which antialiases and
+  resamples in the integer domain. See `lib/image.ml`'s header.
+- **`vlm_training.py` writes PyTorch `.pth` pickles.** This port reads
+  safetensors only and has no pickle reader — a pickle is executable data.
+  Converting the two files into the `vit.`/`adapter.`/`gpt.` namespace
+  layout `Vlm_loader` reads is one `safetensors.torch.save_file` call away
+  on the Python side.
+- **Scope: `llm_quest/gpt`, `llm_quest/gpt_to_llama3`,
+  `llm_quest/multimodal`.** The other twelve packages in `llm_quest/`
+  (`moe`, `alignment`, `finetuning`, `reinforcement_pretraining`,
+  `speculative_decoding`, `llama3_to_deepseekv3`, `llama3_to_gemma3`,
+  `qwen`, `xiaomi`, `linear_attention_to_gated_deltanet`, `common`,
+  `experimental`) are not ported. See "Out of scope" below.
 
 ## Ordered plan (each step gates the next)
 
@@ -51,9 +78,9 @@ it with the next. `make ci` stays green after every row.
 | D3 | RoPE, base | ✅ `lib/rope.ml`, `parity/export_rope.py`, `test/test_rope.ml`. D3a vs `RoPE.apply` (9.8e-8 / 8.6e-8 abs, fp32 ref); D3b relative-position invariance on the *same* q/k vectors at shifted positions (3.3e-16); D3c explicit 2D rotation matrix ≡ apply (exact); D3d `position_ids=[p]` ≡ full-forward row p (exact, 6.0e-8 vs ref). **9 gates**, 3 mutations run against them |
 | D4 | RoPE, `llama3` scaling | ✅ `compute_angles_llama3` vs `_compute_llama3_parameters` on the frequency table alone (2.7e-7 / 5.0e-7, fp32 ref); scaling provably non-identity (7.9e-4) and provably differs from base RoPE (4.6e-4). **4 gates** added, 13 total |
 | D5 | GQA | ✅ `parity/export_gqa.py`, `test/test_gqa.ml`, `GroupedQueryAttention` in `lib/attention.ml`. D5a vs `LlamaAttention` (eager), D5b vs this repo's own `llama_attention.py`; D5c the *anti*-gate — grouping is a permutation, so a repeat-tiling implementation must provably **disagree** (>1e-3) and the true one must be the closer match, which is the only gate that can catch an implementation that is accidentally right; D5d cache sized by `Config.kv_heads`, and a wide `num_heads` cache is **rejected** by both the cache constructor and `forward` rather than silently reshaped; D5e `num_repeat == 1` collapses GQA to plain MHA identically; D5f q/k/v carry no bias, `o_proj` does, and a zero bias ≡ no bias. **18 gates** |
-| E | tiny-random Llama parity | 🔶 E1 only — `parity-llama-forward` in `make ci` asserts `--family llama` exits 0 **and** that it printed the llama layout gate *and* that a logits stage reported OK, so a harness that quietly no-ops cannot pass. The remaining stages land after E |
-| F | Llama-3.2-1B parity | 14 stages on real weights — **optional**, see below |
-| G | Greedy generation parity | token-for-token vs `generate(do_sample=False)` — landed earlier as `parity_gen` (5 gates, cached + uncached paths both token-identical over 20 steps) |
+| E | tiny-random Llama parity | ✅ **Complete.** `Llama.forward_hidden_states` composes D1+D2+D3/D4+D5; `parity.ml` gained `check_llama_layout` (Llama's own expectations, since K/V are `kv_heads * head_dim` wide, not `num_heads * head_dim`). `llama_ref` carries `hidden.0/1/2` + `logits`, and `make ci`'s `parity-llama-forward` gates **every one** plus the layout gate, at 1e-9. This row previously read "🔶 E1 only — the remaining stages land after E". That was true when written, stopped being true at `7290c0a`, and was not updated because nothing failed while it was wrong. |
+| F | Llama-3.2-1B parity | ⬜ **Not started — out of scope for this pass.** 14 stages on real weights (~2.5 GB bf16), plus a `make ci-llama` target that does not exist in the Makefile. See "Out of scope" below. |
+| G | Greedy generation parity | ✅ **Complete** — token-for-token vs `generate(do_sample=False)` as `parity_gen` (5 gates, cached + uncached paths both token-identical over 20 steps) |
 
 ## Multimodality (Parts 1 & 2 of the quest)
 
@@ -69,6 +96,52 @@ The VLM gates were mutation-tested as a batch — breaking early fusion four
 ways (skip the adapter, append instead of place, off-by-one slice, drop
 the vision mask) each takes `make ci` to exit 1. A gate set that has never
 been observed to fail is an assumption.
+
+### The second pass: from "gated" to "usable"
+
+Parity above proved the *forward pass* was right. It did not make the
+models **loadable**, **feedable** or **measurable** — and all three gaps
+were invisible to every gate that existed, because each test built its own
+weights by hand. Three rows close them.
+
+| Step | Piece | Gate |
+| :--- | :--- | :--- |
+| M1 | `lib/vit_loader.ml`, `lib/gpt_repo_loader.ml`, `lib/vlm_loader.ml` + `parity/export_loader.py` — read a real fused checkpoint (`vit.` / `adapter.` / `gpt.` namespaces) | ✅ `test/test_loader_vlm.ml`, **26 gates**. Loading reproduces the reference activations for all three models at once (ViT 9.8e-15, adapter 2.6e-13, fused logits 1.8e-14); parameter counts match the file's element counts; `gpt.` needed its own loader because `vlm_training.py` builds the decoder from `llm_quest.gpt.GPTModel`, a **third** naming scheme alongside HF gpt2 and HF Llama |
+| M2 | `lib/image.ml` — `to_tensor`, ImageNet `normalize`, `resize_bilinear` | ✅ `parity/export_image.py`, `test/test_image.ml`, **17 gates**. `to_tensor` and `normalize` are **bit-identical** to torch (0.000e+00); `resize_bilinear` at 2.22e-16 against torch's `interpolate(align_corners=False)` — *not* torchvision's antialiased resize, which the header and the test output both say. I-d is the anti-gate: on a 9×13 input an axis swap and a half-pixel-off resampler each still produce 16×16 output |
+| M3 | `lib/loss.ml`, `Vlm.vlm_loss`, `Vit.batch_loss`/`batch_accuracy` | ✅ `parity/export_loss.py`, `test/test_loss.ml`, **27 gates**. The subject is `ignore_index`, not softmax: ignored rows leave the mean's denominator as well as its numerator, and an all-ignored reduction is NaN rather than 0.0 |
+| M4 | Vision-prefix KV cache and the caption loop — `Gpt.prefill_from_emb_cached`, `decode_from_emb_cached`, `Vlm.prefill_cached`, `decode_step_cached`, `generate_cached` | ✅ G-a…G-f inside `test/test_loader_vlm.ml`, **6 gates**. Linear instead of the reference's per-step quadratic re-forward; G-b is the claim that they agree, checked per step against the reference's own per-step logits rather than through an argmax |
+
+**Five things only a real checkpoint revealed.** All found by exporting a
+real `state_dict` and pointing a loader at it, none by reading code:
+
+| Finding | What a hand-written table gets wrong |
+| :--- | :--- |
+| `ViTAdapter`'s second `Linear` is at `Sequential` index **3**, not 2 — `Sequential(Linear, GELU, Dropout\|Identity, Linear)`, and no module in the gap carries a parameter | counting only the layers that *have* weights predicts index 2. The first draft claimed `2.weight` and failed on sight of the state dict |
+| `ViTAdapter`'s linears are `bias=False` | the loader was reading biases that no checkpoint has |
+| `GPTModel.out` is `bias=False` while every other Linear is not | ditto, in the other direction |
+| `trf_blocks.N.att.mask` is a persistent **bool** buffer | the reader could not open a real file *at all* — F32/F64/I64 only |
+| That mask stores `triu(ones, diagonal=1)`: **1 means masked** | the port's own `attn_mask` is a bool array where `true` means *attend*. Read straight through, it builds a bidirectional decoder that generates fluent nonsense and fails no shape check |
+
+Plus a sixth found by a gate rather than a load: **`GPTModel.forward`
+adds no positional embedding when `input_embedded=True`** — its
+`x = x + pos_emb` sits *inside* `if not input_embedded:`. Adding positions
+measures **1.36e-01** against the reference's logits (rel ~1e-2): enough
+to wreck a caption, far too small for any structural check to notice.
+
+**The loaders' mutation table, all three run against the committed gates:**
+
+| Mutation | Caught by | Result |
+| :--- | :--- | :--- |
+| Square projection transposed (only where `d_in = d_out`, so `~expected_shape` cannot catch it) | L1 ×5 | 5 FAIL, exit 1 |
+| Conv patch order reversed (kept in-shape) | L1 ×4 | 4 FAIL, exit 1 |
+| `att.mask` polarity flipped | `Gpt_repo_loader.check_mask` | loader refuses, exit 2 |
+
+**M4's mutation table:**
+
+| Mutation | Caught by | Result |
+| :--- | :--- | :--- |
+| Positional embeddings re-added to prefill | G-a, G-b | 2 FAIL, exit 1 |
+| Decode step embedding token-**with**-position instead of bare | G-b, G-c | 2 FAIL, exit 1 |
 
 **D3/D4's mutation table, all three run against the committed gates:**
 
@@ -95,6 +168,31 @@ Run it when convenient; a port without it is still verified, just not
 verified under real numerical conditions. Cost: ~2.5GB bf16 weights,
 ~7.5GB disk with the export, minutes per forward on CPU — hence a
 separate `make ci-llama` target rather than the main `make ci`.
+
+## Out of scope (stated, not implied)
+
+So that "the roadmap is green" is not read as "the port is finished".
+
+**Step F — Llama-3.2-1B parity on real weights.** ⬜ Not started. The
+reasoning above still holds: tiny-random catches structural bugs and F
+would test numerical behaviour under real weight distributions. Cost is
+~2.5 GB bf16 plus ~7.5 GB of disk for the export, and it wants its own
+`make ci-llama` target, which does not exist. Everything else in the
+Llama 3.2 path — config, RoPE, GQA, RMSNorm, SwiGLU, loader, layout gate,
+generation — is ported and gated.
+
+**Twelve of the fifteen packages in `llm_quest/`.** Ported: `gpt`,
+`gpt_to_llama3`, `multimodal`. Not ported: `moe`, `alignment`,
+`finetuning`, `reinforcement_pretraining`, `speculative_decoding`,
+`llama3_to_deepseekv3`, `llama3_to_gemma3`, `qwen`, `xiaomi`,
+`linear_attention_to_gated_deltanet`, `common`, `experimental`. So the
+quest's headline content — Mixture-of-Experts, RL/alignment, fine-tuning,
+speculative decoding, the modern architectures — is unported. The line
+GPT-2 → Llama 3.2 is finished; everything past it is untouched.
+
+**Training.** Deliberate. See "Deliberate simplifications" above for what
+was left behind along with it, and `lib/loss.ml` for the measurement side
+that *was* brought across.
 
 ## Notes
 

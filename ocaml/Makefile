@@ -2,14 +2,22 @@
 # internally, matching llama_attention.py's forward(x, mask, cos, sin, ...).
 LIB = lib/tensor.ml lib/config.ml lib/norm.ml lib/mlp.ml lib/loss.ml lib/rope.ml lib/kv_cache.ml lib/safetensors.ml lib/attention.ml lib/block.ml lib/sampling.ml lib/gpt.ml lib/llama.ml lib/gpt2_loader.ml lib/llama_loader.ml lib/vit.ml lib/vlm.ml lib/image.ml lib/vit_loader.ml lib/gpt_repo_loader.ml lib/vlm_loader.ml
 # Every reference file lives in one directory. Override it in one place
-# rather than per-file: the defaults point at /data/tmp, which is read-only
-# on macOS (SIP), so a fresh machine has to move the whole set anyway and
-# ten separate variables make that a ten-variable invocation.
+# rather than per-file: the defaults point at /data/tmp, and on the
+# machine this was last verified on (Linux, 2026-10-15) that directory is
+# writable and the default works as-is. It did not, on an earlier macOS
+# box where SIP made /data read-only and the whole set had to live in
+# /tmp. A single PARITY_DIR keeps that a one-variable change if you hit
+# another machine where /data is not writable.
 #
 #   make ci PARITY_DIR=/tmp/ocaml-parity
 #
 # The individual REF_* names below are still overridable (?=) for the rare
 # case of pointing one stage at a different export.
+#
+# No reference file is tracked in git: together they are ~670 MB, and they
+# are *derived* — regenerate with ocaml/parity/requirements.txt's pinned
+# venv and the export_*.py scripts, and `pinned.check_pinned()` will
+# refuse to produce them under a different torch/transformers.
 PARITY_DIR ?= /data/tmp/ocaml-parity
 REF ?= $(PARITY_DIR)/gpt2_ref.safetensors
 REF_KV ?= $(PARITY_DIR)/gpt2_kv_ref.safetensors
