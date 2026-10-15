@@ -6,6 +6,14 @@
 
 **LLM Architectures, techniques, and research papers for practice, experimentation, and learning — from scratch.**
 
+> [!NOTE]
+> **OCaml port (this fork):** [`ocaml/`](ocaml/README.md) re-implements the
+> GPT-2, Llama, ViT and VLM parts in pure OCaml (stdlib only, no
+> Owl/torch bindings), every step gated against pinned PyTorch references.
+> Reading order: [`ocaml/README.md`](ocaml/README.md) →
+> [`ocaml/ROADMAP.md`](ocaml/ROADMAP.md) (the gate ledger) →
+> [`ocaml/STUDY.md`](ocaml/STUDY.md) (the twelve hard decisions).
+
 
 <!-- TOC -->
 

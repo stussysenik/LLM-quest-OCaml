@@ -4,7 +4,7 @@
 
 The goal below was met and then extended. Current state, measured:
 
-- `cd ocaml && make ci` exits 0 — **274 PASS across 14 suites**, from a
+- `cd ocaml && make ci` exits 0 — **273 PASS across 14 suites**, from a
   clean tree, on the pinned venv at `/data/tmp/venv`
   (torch 2.14.1+cpu, transformers 5.19.0, safetensors 0.8.0;
   `pinned.check_pinned()` passes).
@@ -40,6 +40,10 @@ What this pass added on top of the original multimodality goal:
   an explicit "Out of scope" section now records step F and the twelve
   unported `llm_quest` packages, so a green roadmap is not read as a
   finished port.
+- A **proofreading pass** (2026-10-15): dead code removed, four vacuous
+  gates made real (one deleted), a temp-file leak fixed, every stale
+  header/doc claim trued up. Net 274 → 273 gates, the delta being the
+  deleted ref-vs-ref rope check. `make clean && make ci` exit 0.
 
 ## LOG
 
@@ -177,3 +181,36 @@ What this pass added on top of the original multimodality goal:
   "every stage to ~1e-13" and the "now measure 3e-16" claim (worst
   reading is 2.7e-15).
 
+- 2026-10-15: **Proofreading pass** (release-readiness audit of `lib/`,
+  `test/`, `parity/`). Removed code nothing calls: `Tensor.bmat*` /
+  `rand_mat` / `rowvec_mul`, `Block.add_mat` (a duplicate of
+  `Tensor.add`) and `block_forward_batch`, `Attention.single_head_no_mask`
+  (the repo's v1/v2 teaching form, never used), `Vit.linear_make`
+  (byte-identical to `Attention.linear_make`), `Tensor.bmat` type.
+  Made gates real: `d5f` now asserts `Attention.gqa_make`'s bias
+  structure instead of restating the test's own record; the loss
+  NaN-accuracy gate now runs through `accuracy_acc_add`/`_frac`; the
+  `hf_eos_contract` check compares the whole greedy prefix, not two
+  tautologies; `test_loader`'s C1 wraps the assertion it claimed to
+  gate; deleted a rope ref-vs-ref "gate" (both sides were file tensors)
+  and its now-dead loads. Fixed the `test_loader_vlm` L5 temp-file leak
+  (`Fun.protect`) and a comment that had the corrupted mask columns
+  wrong (bytes 4–7, not column 1). Trued up: `tensor.ml` layout header
+  (it still said `(d_in x d_out)`), `llama.ml` ("no forward pass yet"),
+  `vlm.ml`'s `decode_step_cached` position claim, the `loss.ml` typo,
+  `vit.ml`'s "checked rather than assumed", test headers' gate counts,
+  `parity.ml`'s ladder (13 hidden states, not 14), README 274 → 273,
+  ROADMAP counts (C4 16, D2 22, D4 3/12, M1 20) and the M3 wording
+  (the `Vlm.vlm_loss` / `Vit.batch_loss` wrappers are ports, not
+  separately gated). Strengthened the vit/vlm references: conv bias is
+  no longer all-zero (V-a could not have caught a dropped bias),
+  re-exported, suites green. `pinned.check_pinned()` now enforces the
+  `safetensors` pin too. `Config.gpt_small_config` now uses exact
+  `Gelu`: the repo's own `gpt_transformer_block.GELU` is the erf form,
+  and `GPT_SMALL_CONFIG` does carry `qkv_bias: False` after all.
+- 2026-10-15: Docs structured for mobile reading: a "Where to start"
+  path at the top of `ocaml/README.md` (README → ROADMAP → STUDY →
+  code in dependency order → `make ci`), and a pointer block on the
+  workspace root README so the port is reachable from the repo landing
+  page. Verified from a clean tree: `make clean && make ci` exit 0,
+  273 PASS, 0 FAIL.

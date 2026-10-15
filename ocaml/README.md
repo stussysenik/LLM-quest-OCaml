@@ -8,6 +8,24 @@ Scope: `llm_quest/gpt`, `llm_quest/gpt_to_llama3`, and
 `llm_quest/multimodal`. Twelve other packages in `llm_quest/` are not
 ported — see `ROADMAP.md` § "Out of scope".
 
+## Where to start (reading path)
+
+1. **This file** — what each module ports, how to build it, and which
+   suite proves which module.
+2. **`ROADMAP.md`** — the build order. Every step states its gates and
+   the failure each gate would catch; read it as the table of contents.
+3. **`STUDY.md`** — the twelve decisions that were expensive here, each
+   with the failure that motivated it. When a design choice in the code
+   looks surprising, the reason is probably one of the twelve.
+4. **The code, in dependency order** — `lib/tensor.ml` → `config.ml` →
+   `norm.ml` → `mlp.ml` → `rope.ml` → `kv_cache.ml` → `attention.ml` →
+   `block.ml` → `gpt.ml` (the GPT-2 path); then the Llama delta
+   (`llama.ml` + `llama_loader.ml`) and the multimodal pair
+   (`vit.ml` → `vlm.ml`).
+5. **The gates** — every module names the suite that proves it; run them
+   all with `make ci` (about two minutes). No claim in these docs is
+   unverified: the numbers here are what the suite prints.
+
 ## Layout
 
 | OCaml | Python counterpart |
