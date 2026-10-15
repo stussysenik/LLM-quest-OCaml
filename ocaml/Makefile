@@ -1,6 +1,6 @@
 # rope.ml precedes attention.ml: GroupedQueryAttention applies RoPE to Q/K
 # internally, matching llama_attention.py's forward(x, mask, cos, sin, ...).
-LIB = lib/tensor.ml lib/config.ml lib/norm.ml lib/mlp.ml lib/rope.ml lib/kv_cache.ml lib/safetensors.ml lib/attention.ml lib/block.ml lib/sampling.ml lib/gpt.ml lib/llama.ml lib/gpt2_loader.ml lib/llama_loader.ml lib/vit.ml lib/vlm.ml lib/image.ml lib/vit_loader.ml lib/gpt_repo_loader.ml lib/vlm_loader.ml
+LIB = lib/tensor.ml lib/config.ml lib/norm.ml lib/mlp.ml lib/loss.ml lib/rope.ml lib/kv_cache.ml lib/safetensors.ml lib/attention.ml lib/block.ml lib/sampling.ml lib/gpt.ml lib/llama.ml lib/gpt2_loader.ml lib/llama_loader.ml lib/vit.ml lib/vlm.ml lib/image.ml lib/vit_loader.ml lib/gpt_repo_loader.ml lib/vlm_loader.ml
 # Every reference file lives in one directory. Override it in one place
 # rather than per-file: the defaults point at /data/tmp, which is read-only
 # on macOS (SIP), so a fresh machine has to move the whole set anyway and
@@ -25,6 +25,7 @@ REF_VIT ?= $(PARITY_DIR)/vit_ref.safetensors
 REF_VLM ?= $(PARITY_DIR)/vlm_ref.safetensors
 REF_VLM_LOADER ?= $(PARITY_DIR)/vlm_loader_ref.safetensors
 REF_IMAGE ?= $(PARITY_DIR)/image_ref.safetensors
+REF_LOSS ?= $(PARITY_DIR)/loss_ref.safetensors
 # Parity is parameterized by family; the dispatch lives in test/parity.ml,
 # so a new family is a new loader + export script, not a new target.
 FAMILY ?= gpt2
@@ -67,6 +68,9 @@ test_loader_vlm: $(LIB) test/test_loader_vlm.ml
 test_image: $(LIB) test/test_image.ml
 	ocamlopt -I lib -o test_image $(LIB) test/test_image.ml
 
+test_loss: $(LIB) test/test_loss.ml
+	ocamlopt -I lib -o test_loss $(LIB) test/test_loss.ml
+
 demo: $(LIB) bin/main.ml
 	ocamlopt -I lib -o demo $(LIB) bin/main.ml
 
@@ -97,6 +101,8 @@ test: test_all test_batched test_kv test_loader test_norm test_mlp test_rope tes
 	./test_loader_vlm $(REF_VLM_LOADER)
 	@test -f $(REF_IMAGE) || (echo "image reference not found: $(REF_IMAGE) -- run: python ocaml/parity/export_image.py $(REF_IMAGE)" && exit 1)
 	./test_image $(REF_IMAGE)
+	@test -f $(REF_LOSS) || (echo "loss reference not found: $(REF_LOSS) -- run: python ocaml/parity/export_loss.py $(REF_LOSS)" && exit 1)
+	./test_loss $(REF_LOSS)
 
 demo-run: demo
 	./demo
@@ -134,6 +140,6 @@ parity-llama-forward: parity_check
 ci: test parity parity-kv parity-gen parity-llama-forward
 
 clean:
-	rm -f test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm test_loader_vlm test_image demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
+	rm -f test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm test_loader_vlm test_image test_loss demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
 
 .PHONY: all test demo-run parity parity-kv parity-gen parity-llama-forward ci clean

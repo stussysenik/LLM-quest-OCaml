@@ -278,6 +278,27 @@ let model_make (rs : Random.State.t) (c : t) : model =
     classifier = linear_make rs emb c.num_classes ~bias:true;
   }
 
+(* ------------------------------------------------------------------ *)
+(* Evaluation (inference-time measurement)                             *)
+(* ------------------------------------------------------------------ *)
+
+(** Cross-entropy of one image's classification against its label, the
+    body of [ViT._calc_loss_batch].
+
+    Per *image*, not per batch: [calc_loss_loader] reduces over batches,
+    and the reduction rule (a running sum over a running count, not a
+    mean of means, because the last batch is short) lives in
+    [Loss.loss_accum]. A "one image is one batch" API is the shape that
+    cannot get the reduction wrong. *)
+let batch_loss (m : model) (img : image) (label : int) : float =
+  Loss.cross_entropy [| forward m img |] [| label |]
+
+(** Whether one image's argmax equals its label — [ViT.accuracy_loader]'s
+    per-example test. Aggregation in [Loss.acc_accum]. *)
+let batch_accuracy (m : model) (img : image) (label : int) : bool =
+  let (c, _) = Loss.accuracy [| forward m img |] [| label |] in
+  c = 1
+
 (** A deterministic random image, [num_channels, height, width], values in
     [-1, 1). Pixels are normalized this way in the training engine too;
     the exact range does not matter for parity, only that it is fixed. *)

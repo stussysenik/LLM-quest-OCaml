@@ -135,6 +135,41 @@ let shifted_text_logits ~(num_vision_tokens : int) (logits : mat) : mat =
     invalid_arg (Printf.sprintf "Vlm.shifted_text_logits: num_vision_tokens=%d, seq=%d" num_vision_tokens s);
   Array.sub logits (num_vision_tokens - 1) (s - num_vision_tokens)
 
+(** [vlm_loss] — next-token prediction over the *text* only.
+
+    Two slice/mask steps, and both are load-bearing:
+
+    1. [shifted_text_logits] drops the first [num_vision_tokens - 1] logit
+       rows, so row 0 is the last image position predicting the first
+       text token. Image positions are context, never targets.
+    2. [text_mask] is applied to the **targets**, not the logits: a padded
+       position is marked [ignore_index] rather than predicted as
+       whatever id happened to sit there. [Loss.cross_entropy] then drops
+       those rows from the mean's denominator as well as its numerator.
+
+    [labels] is one entry per shifted row — the token each row predicts —
+    already aligned, which is how `vlm_loss` receives them ("already
+    aligned with shifted_logits"). The count is [text_len], not
+    [text_len - 1]: the final *logit* row is dropped, not the final
+    text token. A label array of length [text_len - 1] raises rather than
+    quietly scoring a prefix of the caption.
+
+    Returns [nan] when the whole caption is padding — nothing to score,
+    and 0.0 would be indistinguishable from perfect confidence. *)
+let vlm_loss ~(num_vision_tokens : int) ~(text_mask : bool array) ~(labels : int array)
+    (logits : mat) : float =
+  let shifted = shifted_text_logits ~num_vision_tokens logits in
+  let rows = Array.length shifted in
+  if Array.length text_mask <> rows || Array.length labels <> rows then
+    invalid_arg
+      (Printf.sprintf
+         "Vlm.vlm_loss: %d shifted rows but mask has %d and labels %d" rows (Array.length text_mask)
+         (Array.length labels));
+  let targets =
+    Array.mapi (fun i keep -> if keep then labels.(i) else Loss.default_ignore_index) text_mask
+  in
+  Loss.cross_entropy shifted targets
+
 (* ------------------------------------------------------------------ *)
 (* Caption generation                                                   *)
 (* ------------------------------------------------------------------ *)
