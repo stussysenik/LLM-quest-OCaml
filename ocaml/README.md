@@ -18,7 +18,7 @@ ported — see `ROADMAP.md` § "Out of scope".
 | `lib/mlp.ml` | SwiGLU — `LlamaMLP` (transformers), `SiLU`/`FFN` in `llama_transformer_block.py` |
 | `lib/rope.ml` | `RoPE` + `compute_angles_llama3` (transformers) |
 | `lib/kv_cache.ml` | `KVCache` in `llm_quest/utils.py` |
-| `lib/attention.ml` | `gpt_attention.py` (v1/v2/v3 + `MultiHeadAttention`), `GroupedQueryAttention` |
+| `lib/attention.ml` | `gpt_attention.py` (`MultiHeadAttention`), `GroupedQueryAttention`; the encoder form is the ViT's |
 | `lib/block.ml` | `FFN`, `TransformerBlock` in `gpt_transformer_block.py` |
 | `lib/gpt.ml` | `llm_quest/gpt/gpt_model.py` (`GPTModel`) |
 | `lib/sampling.ml` | `sampling*` + `generate_simple_loop` in `llm_quest/generate.py` |
@@ -105,7 +105,7 @@ would notice.
 
 ## Running everything
 
-`make ci` is the one-command green-tree proof: **274 PASS across 14
+`make ci` is the one-command green-tree proof: **273 PASS across 14
 suites**, plus 14 GPT-2 parity stages (embeddings, 11 blocks + final
 norm, logits), a 12-layer KV cross-check and
 the Llama layout/logits boundary check. About two minutes on one core.
@@ -122,7 +122,7 @@ cd ocaml && make ci
 | `test_loader` | 16 | GPT-2/HF loader + `[out, in]` layout |
 | `test_norm` | 15 | `LlamaRMSNorm`, and torch's fp64 kernel |
 | `test_mlp` | 22 | `LlamaMLP`, fp32 and fp64 |
-| `test_rope` | 13 | `RoPE` + `llama3` scaling |
+| `test_rope` | 12 | `RoPE` + `llama3` scaling |
 | `test_gqa` | 18 | `LlamaAttention` + this repo's own |
 | `test_vit` | 25 | `ViTModel` |
 | `test_vlm` | 30 | adapter + early fusion |
@@ -179,10 +179,10 @@ Two conventions that are easy to get backwards, both load-bearing:
 - **The inputs are stored next to the outputs.** So a gate cannot pass by
   comparing the port against its own idea of what the input was.
 
-`parity/pinned.py` refuses to export under a different `transformers` or
-torch than the references were built with. Bump the pin and every
-reference must be re-exported together — otherwise a version bump
-silently invalidates them and looks like a phantom regression.
+`parity/pinned.py` refuses to export under a different `transformers`,
+torch, or `safetensors` than the references were built with. Bump a pin
+and every reference must be re-exported together — otherwise a version
+bump silently invalidates them and looks like a phantom regression.
 
 ## Roadmap and study guide
 

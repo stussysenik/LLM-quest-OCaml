@@ -136,7 +136,9 @@ let () =
   (* HF's stop contract, read off its own forced-EOS output: same length,
      same tokens, last one replaced by the stopping token. *)
   check "hf_eos_contract"
-    (Array.length eos_ids = n && eos_ids.(n - 1) = eos && eos_ids.(n - 2) = new_ids.(n - 2));
+    (Array.length eos_ids = n
+     && Array.to_list (Array.sub eos_ids 0 (n - 1)) = Array.to_list (Array.sub new_ids 0 (n - 1))
+     && eos_ids.(n - 1) <> new_ids.(n - 1));
   check_ids "stop_cached" ~prompt
     ~ours:(cached ~n ~eos_ids:(Some [ stop_token ]))
     ~ref_ids:(Array.sub new_ids 0 (!stop_idx + 1));

@@ -1,4 +1,4 @@
-(** RMSNorm gates D1a-D1d (ROADMAP step D1).
+(** RMSNorm gates D1a-D1e (ROADMAP step D1).
 
     Usage: [./test_norm <norm_ref.safetensors>]
     (written by [ocaml/parity/export_norm.py], which instantiates
@@ -15,6 +15,7 @@
            mean is zero, and differing in the three named ways after that |
     | D1c | the eps-placement convention changes the result |
     | D1d | [Config.norm_eps] is family-specific, and is what D1a ran with |
+    | D1e | vs torch's fp64 [rms_norm] kernel (no dtype cast), at 1e-12 |
 
     D1a compares against the file's own inputs, so it cannot pass by
     agreeing with PyTorch on the wrong numbers. D1b is the gate that earns

@@ -62,8 +62,8 @@ let default_ignore_index = -100
 
     Returns [nan] when every row is ignored, matching
     [calc_loss_loader]'s empty-loader behaviour. Raises if the row counts
-    disagree, because a silent truncat here would change the denominator
-    and produce a plausible wrong loss. *)
+    disagree, because a silent truncation here would change the
+    denominator and produce a plausible wrong loss. *)
 let cross_entropy ?(ignore_index = default_ignore_index) (logits : mat) (targets : int array) : float =
   let n = Array.length logits in
   if Array.length targets <> n then

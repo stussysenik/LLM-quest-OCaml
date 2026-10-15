@@ -76,11 +76,10 @@ HIDDEN_SIZE_FACTOR = 4
 # cross several decode steps and the cache boundary.
 MAX_GEN = 12
 MAX_GATED_STEPS = 7
-# A greedy argmax on a randomly-initialised model can land on any id, so
-# pinning an EOS the loop might never reach would silently drop the stop
-# contract from the gate. This is checked after export instead: the log
-# reports whether EOS was hit.
-EOS_ID = None
+# The loop runs a fixed 12 steps: a randomly-initialised model's greedy
+# argmax almost never lands on the VLM's EOS, so an EOS branch here would
+# be dead code that reads like a promise. The stop contract is gated by
+# the generation tests, not by this export.
 
 
 def build_vit(g):
@@ -209,8 +208,6 @@ def main(out_path):
             step_logits.append(lg.clone())
             tok = int(torch.argmax(lg).item())
             greedy.append(tok)
-            if tok == EOS_ID:
-                break
             seq = torch.cat([seq, gpt.emb_dict.weight[tok].reshape(1, 1, -1)], dim=1)
 
     t["ref.vision_seq"] = seq[0, :n_vit, :].clone()      # the prefill window
@@ -222,8 +219,8 @@ def main(out_path):
     for i, lg in enumerate(step_logits[:MAX_GATED_STEPS]):
         t[f"ref.step{i}_last_logits"] = lg.clone()
 
-    print(f"\ngeneration: {len(greedy)} greedy tokens (max {MAX_GEN})"
-          f"{' — EOS hit, stop contract exercised' if greedy and greedy[-1] == EOS_ID else ' — no EOS'}")
+    print(f"\ngeneration: {len(greedy)} greedy tokens (fixed {MAX_GEN}-step run; "
+          f"EOS stop is gated by test_loader_vlm G-d)")
 
     n_conv = len([k for k in vit.state_dict() if "conv_proj" in k])
     print(f"\nviT state_dict: {len(vit.state_dict())} tensors (conv tensors are 4-D: {n_conv})")

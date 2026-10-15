@@ -6,15 +6,18 @@ transformers + torch + model-revision triple. Without the pin, a
 the resulting gate failure reads as a phantom OCaml regression.
 
 `check_pinned()` turns that into a loud import-time failure instead.
-Both library pins are enforced, not just the advertised one: torch is
-pinned to the CPU *build*, because a CUDA torch and a CPU torch reduce
+All three library pins are enforced, not just the advertised ones: torch
+is pinned to the CPU *build*, because a CUDA torch and a CPU torch reduce
 in different orders, so a reference exported on one and gated against
 the other looks like a numerical disagreement that is really an
-environment mismatch. One pin covers every family — the transformers
-and torch versions below produced the GPT-2 AND the Llama references,
-so bumping either invalidates both and both get re-exported together.
+environment mismatch; safetensors is pinned because its mmap/alignment
+behaviour is what `align_parameters` exists to work around. One pin
+covers every family — the versions below produced the GPT-2 AND the
+Llama references, so bumping any of them invalidates both and both get
+re-exported together.
 """
 
+import safetensors
 import torch
 import transformers
 
@@ -40,6 +43,7 @@ def check_pinned() -> None:
     for module, label, expected in (
         (transformers, "transformers", TRANSFORMERS_VERSION),
         (torch, "torch", TORCH_VERSION),
+        (safetensors, "safetensors", SAFETENSORS_VERSION),
     ):
         found = module.__version__
         # The CPU index serves torch without the +cpu local-version suffix

@@ -3,10 +3,9 @@
 
     Conventions (row-major, matching PyTorch semantics):
     - [vec] is a 1D row: [float array]
-    - [mat] is 2D [seq x dim]: [float array array], i.e. [m.(i).(j)]
-    - Linear weights are stored as (d_in x d_out) so that a row-vector
-      forward is [x @ w + b], exactly like [nn.Linear] applied to the
-      last dim. *)
+    -     [mat] is 2D [seq x dim]: [float array array], i.e. [m.(i).(j)]
+    - Linear weights are stored [(out, in)] — see [linear_fwd], the one
+      linear op, for why that is the project-wide convention. *)
 
 type vec = float array
 type mat = float array array
@@ -20,10 +19,6 @@ let ones_vec n : vec = Array.make n 1.0
 let zeros_mat rows cols : mat = Array.make_matrix rows cols 0.0
 
 let copy_mat (m : mat) : mat = Array.map Array.copy m
-
-(** Uniform [0,1) matrix, mirrors [torch.rand]. *)
-let rand_mat (rs : Random.State.t) rows cols : mat =
-  Array.init rows (fun _ -> Array.init cols (fun _ -> Random.State.float rs 1.0))
 
 (** Standard-normal matrix via Box-Muller, for GPT-style init. *)
 let randn_mat (rs : Random.State.t) rows cols : mat =
@@ -55,19 +50,6 @@ let mat_mul (a : mat) (b : mat) : mat =
             s := !s +. a.(i).(l) *. b.(l).(j)
           done;
           !s))
-
-(** Row-vector [x (d_in)] @ [w (d_in x d_out)] = [vec (d_out)]. *)
-let rowvec_mul (x : vec) (w : mat) : vec =
-  let d_in = Array.length x in
-  let wr = Array.length w in
-  if wr <> d_in then invalid_arg "Tensor.rowvec_mul: dim mismatch";
-  let d_out = if wr = 0 then 0 else Array.length w.(0) in
-  Array.init d_out (fun j ->
-      let s = ref 0.0 in
-      for i = 0 to d_in - 1 do
-        s := !s +. x.(i) *. w.(i).(j)
-      done;
-      !s)
 
 (** Elementwise product of two same-shaped matrices ([Array.map2]
     raises on any shape mismatch). *)
@@ -170,9 +152,5 @@ let multinomial (rs : Random.State.t) (p : vec) : int =
     single-sequence kernels above. Batching is wiring (padding,
     per-sequence positions, per-sequence readout) — never new math —
     so Gate 1 (batch=1 ≡ single path) holds by construction and the
-    gates that bite are 3-5. *)
-type bmat = mat array
-
-let bmat_map (f : mat -> mat) (b : bmat) : bmat = Array.map f b
-
-let bmat_mapi (f : int -> mat -> mat) (b : bmat) : bmat = Array.mapi f b
+    gates that bite are 3-5. There is no [bmat] type: a batch is just
+    [mat array], and every consumer already has the array ops for it. *)

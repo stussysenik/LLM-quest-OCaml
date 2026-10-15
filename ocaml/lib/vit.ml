@@ -42,8 +42,8 @@
     Images are [b, num_channels, height, width] in the Python; this port
     takes a single image as [num_channels, height, width] and loops the
     batch explicitly. Batching is wiring, not math — the same reasoning as
-    [Tensor.bmat] and [Attention.mha_forward_batch] — and it keeps one
-    image's arithmetic on one array. *)
+    [Attention.mha_forward_batch] — and it keeps one image's arithmetic
+    on one array. *)
 
 open Tensor
 
@@ -70,9 +70,10 @@ type t = {
   num_classes : int;
 }
 
-(** Number of patches, [H*W / P^2]. Checked rather than assumed: a
-    non-integer is how a wrong [patch_size] announces itself here instead
-    of as a silent misalignment between the conv's output grid and the
+(** Number of patches, [H*W / P^2]. The division is only meaningful when
+    the image divides evenly, which [model_make] and [Vit_loader.load]
+    check at their boundary — a wrong [patch_size] is refused there
+    rather than silently misaligning the conv's output grid against the
     positional table. *)
 let num_patches (c : t) : int = (c.img_height * c.img_width) / (c.patch_size * c.patch_size)
 
@@ -235,12 +236,6 @@ let forward (m : model) (img : image) : Tensor.vec =
 (* Construction from scratch (for the self-consistency gates)          *)
 (* ------------------------------------------------------------------ *)
 
-(** GPT-style init, [N(0, 0.02)], matching [Attention.linear_make] so that
-    the from-scratch model and a loaded one are built the same way. *)
-let linear_make (rs : Random.State.t) d_in d_out ~bias : Attention.linear =
-  let w = randn_mat rs d_in d_out |> Array.map (Array.map (fun v -> v *. 0.02)) |> Tensor.transpose in
-  { Attention.w; b = (if bias then Some (zeros_vec d_out) else None); d_in; d_out }
-
 let model_make (rs : Random.State.t) (c : t) : model =
   if c.img_height mod c.patch_size <> 0 || c.img_width mod c.patch_size <> 0 then
     invalid_arg "Vit.model_make: image dims must be divisible by patch_size";
@@ -271,11 +266,11 @@ let model_make (rs : Random.State.t) (c : t) : model =
             ln_1 = Norm.layernorm_make ~eps:1e-5 emb;
             ln_2 = Norm.layernorm_make ~eps:1e-5 emb;
             att = mha_make emb;
-            ffn_l1 = linear_make rs emb ffn_hidden ~bias:true;
-            ffn_l2 = linear_make rs ffn_hidden emb ~bias:true;
+            ffn_l1 = Attention.linear_make rs emb ffn_hidden ~bias:true;
+            ffn_l2 = Attention.linear_make rs ffn_hidden emb ~bias:true;
           });
     final_ln = Norm.layernorm_make ~eps:1e-5 emb;
-    classifier = linear_make rs emb c.num_classes ~bias:true;
+    classifier = Attention.linear_make rs emb c.num_classes ~bias:true;
   }
 
 (* ------------------------------------------------------------------ *)

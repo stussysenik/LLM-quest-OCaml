@@ -197,10 +197,10 @@ let () =
   let silu_ours = Mlp.silu_vec silu_x in
   let silu_finite = Array.for_all (fun v -> not (Float.is_nan v) && not (Float.is_infinite v)) in
   check "d2c_silu_grid_is_finite" (silu_finite silu_ours);
-  (* vs torch, on the points where the fp32 reference can represent
-     the answer: abs 1e-6 covers the fp32 rounding of values up to ~20
-     (one ulp at 20 is ~2e-6... the grid's largest is 800, where both
-     sides are exact). *)
+  (* vs torch: the reference is the fp32 evaluation, so the bound can
+     only be as tight as one fp32 ulp at the largest grid magnitude
+     (one ulp at 800 is ~6e-5). The grid's values were chosen so both
+     sides are exact well below that, which is why 1e-6 passes. *)
   check "d2c_silu_matches_torch" (max_abs_diff_vec silu_ours silu_ref <= 1e-6);
   (* And the same grid against torch in fp64. The fp32 grid can only
      bound this at ~1e-6; on the points it covers, silu is a handful of

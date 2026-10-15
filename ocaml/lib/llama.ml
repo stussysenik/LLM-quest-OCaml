@@ -1,11 +1,15 @@
-(** Llama model weights, as loaded from an HF checkpoint (ROADMAP step C).
+(** Llama model weights and forward pass, as loaded from an HF
+    checkpoint (ROADMAP steps C and E).
 
     This module owns the model's *shape*; the kernels own its
-    arithmetic. There is no forward pass yet — RMSNorm, SwiGLU, RoPE and
-    GQA land in steps D1-D5, each gated in isolation before anything is
-    composed. Loading is already fully shape-checked (see
-    [Llama_loader]), so by the time a forward pass exists every tensor
-    here is known to have the shape its name claims.
+    arithmetic. [forward_hidden_states] composes them in the same order
+    as HF's [LlamaForCausalLM]: embedding lookup, then per layer
+    RMSNorm → GQA with RoPE → residual → RMSNorm → SwiGLU → residual,
+    then the final RMSNorm and the (possibly tied) head. Each of those
+    kernels was gated in isolation first (steps D1-D5); step E then
+    gates the composition. Loading is fully shape-checked (see
+    [Llama_loader]), so every tensor here has the shape its name
+    claims.
 
     Weights are stored **as HF writes them** — [nn.Linear] is
     [(out, in)], so this loader never transposes. That is the opposite

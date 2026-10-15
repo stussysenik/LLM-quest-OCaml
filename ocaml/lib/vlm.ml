@@ -231,9 +231,10 @@ let prefill_cached ~(context_length : int) (m : model) (cache : Kv_cache.t) ~(im
 
     The bare embedding is [Gpt.tok_emb] directly rather than [Gpt.embed],
     for the reason [vision_sequence] gives: during generation the
-    reference appends [vlm_model.emb_dict(next_token_id)] and lets
-    [input_embedded=True] add the position once. Using [Gpt.embed] would
-    add it twice. *)
+    reference appends [vlm_model.emb_dict(next_token_id)] and
+    [input_embedded=True] adds **no** position, so the generated tokens
+    carry none. Using [Gpt.embed] would add the position the reference
+    never adds. *)
 let decode_step_cached (m : model) (cache : Kv_cache.t) ~(tok : int) : vec =
   if tok < 0 || tok >= m.gpt.Gpt.cfg.Config.vocab_size then
     invalid_arg (Printf.sprintf "Vlm.decode_step_cached: token %d out of range" tok);

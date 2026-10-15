@@ -1,10 +1,10 @@
 (** Past-KV cross-check (Gate K5+1): OCaml cache after prefill vs
     PyTorch `past_key_values` on the same 4-token prefix.
 
-    This proves the cache holds the exact tensors PyTorch holds — not
+    This proves the cache holds the same tensors PyTorch holds — not
     just that generation converges. fp32-vs-fp64 summation noise on
-    K/V (magnitudes O(1-10)) lands ~1e-6, so dual gates abs=1e-3 (with
-    headroom) and rel=1e-5.
+    K/V (magnitudes O(1-10)) lands ~1e-6; the committed bounds are
+    deliberately loose (abs 1e-3) with the rel gate (1e-5) binding.
 
     Usage: [./parity_kv <gpt2_weights.safetensors> <gpt2_kv_ref.safetensors>]
     (second file written by [ocaml/parity/export_kv.py]). *)

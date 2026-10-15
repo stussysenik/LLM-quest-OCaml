@@ -20,7 +20,8 @@ numbers instead of raising the inner-dim check — the silent-wrong
 failure mode the [out, in] layout doctrine exists for. The non-square
 tiny case is where the same mistake is loud.
 
-Weights are randn / sqrt(fan_in) (Xavier scaling), not plain randn: the
+Weights are randn / sqrt(fan_in) (explicit fan-in scaling), not plain
+randn: the
 gated product amplifies — plain randn weights put |ref| in the thousands,
 where one fp32 ulp is already ~1e-3 absolute and a dual abs+rel gate
 would be measuring the reference's rounding rather than our error. The

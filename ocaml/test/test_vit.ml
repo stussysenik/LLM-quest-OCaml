@@ -1,4 +1,4 @@
-(** ViT gates V-a..V-f (multimodal Part 1).
+(** ViT gates V-a..V-g (multimodal Part 1).
 
      Usage: [./test_vit <vit_ref.safetensors>]
      (written by [ocaml/parity/export_vit.py], which instantiates the
@@ -11,10 +11,10 @@
      | V-a | patch embedding: conv stride == kernel, [emb, C*P*P] kernel, bias |
      | V-b | patch order is row-major over the (H/P, W/P) grid |
      | V-c | CLS token is prepended at sequence position 0 |
-     | V-d | attention is **unmasked** — the decoder form with every
-     |       position visible must agree with the encoder form |
+     | V-d | attention is **unmasked** — the decoder form with every position visible must agree with the encoder form |
      | V-e | LayerNorm convention: eps **outside** the sqrt, not HF's inside |
      | V-f | logits come from the CLS token, and the whole stack composes |
+     | V-g | GELU is the exact fp64 erf path, gated at 1e-13, not bounded at A&S's 2e-7 |
 
      V-d and V-e are the two that a GPT-inherited implementation gets
      wrong while still looking right.

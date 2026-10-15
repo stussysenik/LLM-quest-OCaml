@@ -86,7 +86,7 @@ def export_case(name, cfg, tensors):
         vit.patch_embedding.conv_proj.weight.copy_(
             randn_like(emb, C * P * P, g).reshape(emb, C, P, P)
         )
-        vit.patch_embedding.conv_proj.bias.copy_(torch.zeros(emb))
+        vit.patch_embedding.conv_proj.bias.copy_(randn_like(emb, 1, g).reshape(-1))
         vit.patch_embedding.cls_token.copy_(randn_like(1, emb, g).reshape(1, 1, emb))
         vit.pos_embedding.copy_(randn_like(n_patch + 1, emb, g).reshape(1, n_patch + 1, emb))
         for blk in vit.transformer_blocks:
@@ -174,10 +174,11 @@ def main(out_path):
         export_case(name, cfg, tensors)
 
     # A GELU grid, because the ViT FFN is the only place in this port where
-    # GELU is compared against torch's *exact* erf. The OCaml kernel uses an
-    # Abramowitz & Stegun 7.1.26 approximation with max error ~1.5e-7, which
-    # is why the V-f stages are gated at 1e-6 rather than 1e-9. Pinning the
-    # grid turns that limitation into a measured number instead of a comment.
+    # GELU is compared against torch's *exact* erf. The OCaml kernel computes
+    # erf itself (Maclaurin series below 2, continued fraction above; 1.11e-15
+    # measured over [-12, 115]), so the grid pins the V-g gate at 1e-13 — far
+    # above the port's own ULP of drift and far below the 2.12e-07 bound of
+    # the Abramowitz & Stegun polynomial it replaced.
     gx = torch.tensor([-8.0, -4.0, -3.0, -2.0, -1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0, 2.0, 3.0, 4.0, 8.0], dtype=torch.float64)
     tensors["v1.gelu.x"] = gx
     tensors["v1.gelu.ref"] = torch.nn.functional.gelu(gx).contiguous()

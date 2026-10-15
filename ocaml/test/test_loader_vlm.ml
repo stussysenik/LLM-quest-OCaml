@@ -23,8 +23,10 @@
      A gate that only confirms the happy path cannot tell a correct
      reader from a permissive one.
 
-   Tolerances are 1e-9 dual abs+rel throughout, the same gate the rest of
-   the port runs at now that [Norm.erf] is fp64-accurate. *)
+   Tolerances are 1e-9 absolute throughout (the [gate] helper prints the
+   reference's magnitude for context but does not scale by it), the same
+   bound the rest of the port runs at now that [Norm.erf] is
+   fp64-accurate. *)
 
 open Tensor
 
@@ -219,10 +221,11 @@ let () =
      Tested by *corrupting the file* rather than by asserting a helper
      raises — a gate that only re-states the existence of a check is the
      "gate that cannot fail" shape this repo has found and fixed four
-     times. [Safetensors.file.data] is a [bytes], so the fix is a
-     four-byte write: row 0, column 1 of the first block's mask, which a
-     causal mask requires to be 1.0 (this checkpoint stores the *upper*
-     triangle as "masked", so the corruption clears it). *)
+     times. [Safetensors.file.data] is a [bytes] and the mask is stored
+     as one byte per element, so the fix is a four-byte write at
+     [off_start + 4]: row 0, columns 4-7 of the first block's mask,
+     which a causal mask requires to be 1.0 (this checkpoint stores the
+     *upper* triangle as "masked", so the corruption clears it). *)
   Printf.printf "\nL5 anti-gates — a non-causal mask buffer is refused\n";
   let with_patched_bytes (name : string) (offset : int) (value : float) : string =
     let data = Bytes.copy f.Safetensors.data in
@@ -237,9 +240,13 @@ let () =
   check "L5 a non-causal mask buffer is rejected"
     (raises (fun () ->
          let tmp = with_patched_bytes "mask" (mask_entry.Safetensors.off_start + 4) 0.0 in
-         let g = Gpt_repo_loader.load (Safetensors.subset (Safetensors.open_file tmp) ~prefix:"gpt.") gpt_cfg in
-         ignore g;
-         Sys.remove tmp));
+         Fun.protect
+           ~finally:(fun () -> Sys.remove tmp)
+           (fun () ->
+             let g =
+               Gpt_repo_loader.load (Safetensors.subset (Safetensors.open_file tmp) ~prefix:"gpt.") gpt_cfg
+             in
+             ignore g)));
   (* And the same buffer, truncated: a checkpoint saved at a different
      context_length is the realistic version of this failure. *)
   check "L5 a mask of the wrong size is rejected"

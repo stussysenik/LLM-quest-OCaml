@@ -10,9 +10,9 @@ Writes ONE safetensors file containing:
   - every tensor of the model's state_dict() (cloned: tied weights like
     lm_head/wte share storage and save_file rejects that)
   - ref.input_ids      (I64, 1D squeezed)
-  - ref.hidden.{0..L}  (F32, 2D squeezed: embeddings + block outputs +
+  - ref.hidden.{0..L}  (F64, 2D squeezed: embeddings + block outputs +
     the post-final-norm state, batch dim removed)
-  - ref.logits         (F32, 2D squeezed: seq x vocab)
+  - ref.logits         (F64, 2D squeezed: seq x vocab)
 
 Usage:
     python ocaml/parity/export_reference.py --family gpt2  /data/tmp/ocaml-parity/gpt2_ref.safetensors

@@ -137,6 +137,11 @@ let gpt_config_124m =
         };
   }
 
+(** Mirrors `GPT_SMALL_CONFIG` in [config.py]. Its GELU is the repo's
+    own [gpt_transformer_block.GELU], which is the exact erf form —
+    hence [`Gelu`], not [`Gelu_new`]: the from-scratch path does not use
+    HF's tanh approximation. (Unreferenced within [ocaml/]; kept as the
+    documented counterpart of the Python training config.) *)
 let gpt_small_config =
   {
     vocab_size = 50304;
@@ -149,7 +154,7 @@ let gpt_small_config =
           n_positions = 256;
           n_inner = None;
           layer_norm_eps = 1e-5;
-          activation = `Gelu_new;
+          activation = `Gelu;
           qkv_bias = false;
         };
   }

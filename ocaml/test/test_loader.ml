@@ -101,8 +101,11 @@ let () =
 
   (* ---------------- C1: keys and shapes ---------------- *)
   let f = Safetensors.open_file path in
-  Safetensors.assert_exact_keys f ~skip_prefix:"ref." (Llama_loader.expected_keys cfg);
-  check "c1_key_set_matches_config" true;
+  check "c1_key_set_matches_config"
+    (try
+       Safetensors.assert_exact_keys f ~skip_prefix:"ref." (Llama_loader.expected_keys cfg);
+       true
+     with _ -> false);
 
   let m = Llama_loader.load f cfg in
   check "c1_embed_tokens_shape" (shape m.Llama.embed_tokens = (cfg.Config.vocab_size, e));

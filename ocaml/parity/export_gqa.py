@@ -21,9 +21,10 @@ step E is not a green D5 (see ROADMAP.md).
 
 Weights are randn / sqrt(fan_in) so activations stay O(1) and the dual
 abs+rel gate is calibrated on magnitude rather than on the reference's own
-fp32 rounding. W_q is deliberately a different fan_in from W_k/W_V (hidden
-vs hidden too, but different shapes) so a transposed or mis-shaped
-projection cannot agree with the reference by accident.
+fp32 rounding. W_q is deliberately a different *shape* from W_k/W_V
+(num_heads * head_dim = 64 rows vs num_kv_groups * head_dim = 32, same
+fan_in) so a transposed or mis-swapped projection cannot agree with the
+reference by accident.
 
 Writes (all F32, batch dim squeezed — attention is per-token over the
 last dim, so [batch, seq, hidden] and [batch*seq, hidden] are the same

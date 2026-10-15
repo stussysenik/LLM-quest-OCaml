@@ -344,8 +344,12 @@ let run_case (f : Safetensors.file) (name : string) ~(adapter_type : string) ~(v
 
   (* ---- V2-e: the whole stack ---- *)
   gate (Printf.sprintf "V2-e fused logits (%s)" name) logits_masked (Safetensors.mat_of_f64 f (g "ref_logits")) tol tol;
+  (* Interface pin: [forward] is the hidden-state path composed with the
+     head. Today's code satisfies this by construction, but the gate
+     holds the public contract — a future [forward] that diverges from
+     [forward_hidden_states] (extra scale, dropped mask) fails here. *)
   let hidden = Vlm.forward_hidden_states ~text_mask:(Some text_mask) model ~image:img ~ids in
-  check (Printf.sprintf "V2-e hidden states are pre-head (%s)" name)
+  check (Printf.sprintf "V2-e forward = hidden_states composed with head (%s)" name)
     (max_abs_diff_mat (Attention.linear_forward_batch gpt.Gpt.lm_head hidden) logits_masked < 1e-18);
 
   (* ---- V2-f: the last image position predicts the first text token ---- *)

@@ -5,8 +5,8 @@
 
     Gates (from [ocaml/ROADMAP.md]):
     - embeddings (hidden.0) match to ~1e-6  → weight loader correct
-    - block outputs (hidden.1..L) to ~1e-5  → architecture correct
-    - post-final-norm state to ~1e-5
+    - block outputs (hidden.1..L-1) to ~1e-5 → architecture correct
+    - post-final-norm state (hidden.L) to ~1e-5
     - final logits to ~1e-4                 → fp32 accumulation over 12 layers
 
     [run] below is the whole harness: family-independent by construction.
@@ -70,7 +70,7 @@ type runnable = {
   states : int array -> Tensor.mat list; (** [embeddings; block_0; ...] *)
   final_norm : Tensor.mat -> Tensor.mat;
   logits : int array -> Tensor.mat;
-  final_norm_label : string; (** stage name: ["block_11_lnf"], ["block_1_rmsnorm"] *)
+  final_norm_label : string; (** stage name: ["block_11_lnf"], ["block_1_lnf"] *)
 }
 
 type family = { name : string; load : string -> runnable }
@@ -225,9 +225,10 @@ let load_reference (path : string) ~n_layers : reference =
 (* ------------------------------------------------------------------ *)
 
 (** The one stage loop. Reads a family, runs the same ladder for it —
-    one gate per hidden state the export wrote ([1 + n_layers] of them,
-    14 for gpt2), then logits — reports the same way, returns the
-    breach count. *)
+    one gate per hidden state the export wrote (13 for gpt2: the
+    embedding, the [n_layers - 1] raw block outputs, and the
+    post-final-norm slot), then the logits — 14 numeric gates.
+    Reports the same way, returns the breach count. *)
 let run ~(family : family) (path : string) : int =
   let model = family.load path in
   let n_layers = model.n_layers in

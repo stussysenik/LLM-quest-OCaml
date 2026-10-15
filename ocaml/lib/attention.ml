@@ -1,14 +1,17 @@
 (** Causal self-attention, mirroring [llm_quest/gpt/gpt_attention.py].
 
-    Progression kept from the Python file:
-    - [SelfAttention_v1]: three raw rand matrices, no mask.
-    - [SelfAttention_v2]: linear (w + optional bias) projections, no mask.
-    - [SelfAttention_v3]: + causal mask (single batch for clarity).
-    - [mha]: optimized multi-head attention with head splitting,
-      causal mask, padding mask ([attn_mask]: true = real token),
-      and an optional hook to prepend KV-cache K/V
-      (see [Kv_cache]). Dropout is a no-op at inference
-      ([drop_rate = 0.0] in every shipped config).
+    The Python file builds single-head attention three times (v1/v2/v3)
+    before the optimized [MultiHeadAttention]; this port keeps the two
+    forms the repository actually uses:
+
+    - [mha]: multi-head attention with head splitting, causal mask,
+      padding mask ([attn_mask]: true = real token), and an optional
+      hook to prepend KV-cache K/V (see [Kv_cache]).
+    - [mha_forward_encoder]: the same, with **no mask at all** — the
+      ViT's encoder form.
+
+    Dropout is a no-op at inference ([drop_rate = 0.0] in every shipped
+    decoder config).
 
     Shapes below use [s] = seq len, [d] = emb dim, [h] = heads. *)
 
@@ -173,17 +176,6 @@ let mha_forward ?(attn_mask : bool array option = None) ?(kv : Kv_cache.layer_kv
   let qh, kh, vh = project_split a x in
   let kh_full, vh_full = with_prefix a kv kh vh in
   combine ~attn_mask a qh kh_full vh_full
-
-(** Teaching helper: unmasked single-head attention (v1/v2 behaviour). *)
-let single_head_no_mask ~w_q ~w_k ~w_v (x : mat) : mat =
-  let q = linear_forward_batch w_q x in
-  let k = linear_forward_batch w_k x in
-  let v = linear_forward_batch w_v x in
-  let hd = if Array.length q = 0 then 1 else Array.length q.(0) in
-  let scale = 1.0 /. sqrt (float_of_int hd) in
-  let scores = mat_mul q (transpose k) in
-  Array.iter (fun row -> Array.iteri (fun j s -> row.(j) <- s *. scale) row) scores;
-  mat_mul (softmax_rows scores) v
 
 (** Batched MHA (parity Gate 1-2): item [i] runs the verified
     [mha_forward] with causal + padding mask [attn_mask.(i)]

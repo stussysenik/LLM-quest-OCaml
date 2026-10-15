@@ -38,7 +38,6 @@ import pinned
 
 pinned.check_pinned()
 
-SEED = 20250101
 HEAD_DIM = 16
 CTX_LEN = 32
 BASE = 10000.0

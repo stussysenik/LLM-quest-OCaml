@@ -1,5 +1,5 @@
 (* Gates for [Loss] and the two eval entry points.
-   18 gates. The subject is not that softmax is hard — it is
+   27 gates. The subject is not that softmax is hard — it is
    `ignore_index`, which is invisible until a caption has padding. *)
 
 open Tensor
@@ -49,7 +49,9 @@ let () =
         check (name ^ " loss is NaN when nothing is kept") (is_nan ours);
         check (name ^ " accuracy is NaN when nothing is kept")
           (let c, t = Loss.accuracy logits targets in
-           c = 0 && t = 0 && is_nan (Loss.accuracy_acc_frac (Loss.accuracy_acc_create ()))))
+           let acc = Loss.accuracy_acc_create () in
+           Loss.accuracy_acc_add acc c t;
+           c = 0 && t = 0 && is_nan (Loss.accuracy_acc_frac acc)))
       else (
         Printf.printf "  %-44s ours=%.12f ref=%.12f\n" (name ^ " cross-entropy") ours ref_loss;
         check (name ^ " cross-entropy matches torch") (near ours ref_loss);

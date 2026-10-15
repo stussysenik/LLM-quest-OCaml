@@ -239,9 +239,15 @@ let () =
 
   (* ---------------- D5f: bias structure ---------------- *)
   Printf.printf "D5f: bias structure\n";
-  check "d5f_q_carries_no_bias" ((mk_linear w_q None).Attention.b = None);
-  check "d5f_out_proj_carries_bias"
-    (match (mk_linear w_o (Some b_o)).Attention.b with Some _ -> true | None -> false);
+  (* Asserted on the production constructor, not on a record this test
+     builds itself: [gqa_make] is what ships, and its bias structure is
+     a real claim (q/k/v None, out_proj Some) that a flipped flag would
+     silently break. *)
+  let built = Attention.gqa_make (Random.State.make [| 7 |]) ~d_in ~d_out ~num_heads ~num_kv_groups () in
+  check "d5f_qkv_carry_no_bias"
+    (built.Attention.w_q.Attention.b = None && built.Attention.w_k.Attention.b = None
+     && built.Attention.w_v.Attention.b = None);
+  check "d5f_out_proj_carries_bias" (built.Attention.out_proj.Attention.b <> None);
   let zero_bias = Array.make d_out 0.0 in
   let with_zero = Attention.gqa_forward ~cos ~sin { a with Attention.out_proj = mk_linear w_o (Some zero_bias) } x in
   let with_none = Attention.gqa_forward ~cos ~sin { a with Attention.out_proj = mk_linear w_o None } x in

@@ -92,7 +92,7 @@ def build_vit(cfg, g):
     n_patch = (cfg["img_height"] * cfg["img_width"]) // (P * P)
     with torch.no_grad():
         vit.patch_embedding.conv_proj.weight.copy_(randn(emb, C * P * P, g).reshape(emb, C, P, P))
-        vit.patch_embedding.conv_proj.bias.copy_(torch.zeros(emb))
+        vit.patch_embedding.conv_proj.bias.copy_(randn_vec(emb, g))
         vit.patch_embedding.cls_token.copy_(randn(1, emb, g).reshape(1, 1, emb))
         vit.pos_embedding.copy_(randn(n_patch + 1, emb, g).reshape(1, n_patch + 1, emb))
         for blk in vit.transformer_blocks:

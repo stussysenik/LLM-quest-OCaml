@@ -125,7 +125,7 @@ let () =
     failwith (Printf.sprintf "test_rope: pos=%d exceeds ctx_len=%d" pos ctx_len);
 
   (* ---------- D3a: vs RoPE.apply (full-forward, positions 0..seq-1) ---------- *)
-  Printf.printf "D3a: Rope.apply vs RoPE.apply (full-forward, positions 0..%d)\n" seq_len;
+  Printf.printf "D3a: Rope.apply vs RoPE.apply (full-forward, positions 0..%d)\n" (seq_len - 1);
   let q_ours = Rope.apply ~cos ~sin q in
   let k_ours = Rope.apply ~cos ~sin k in
   gate "d3a_q" q_ours q_ref 1e-5 1e-5;
@@ -201,8 +201,6 @@ let () =
   (* ---------- D4: llama3 scaling ---------- *)
   if Array.length Sys.argv >= 3 then (
     let f4 = Safetensors.open_file Sys.argv.(2) in
-    let inv_freq_ref = Safetensors.vec_of f4 "d4.inv_freq" in
-    let base_inv_freq_ref = Safetensors.vec_of f4 "d4.base_inv_freq" in
     let cos_ref = Safetensors.mat_of f4 "d4.cos" in
     let sin_ref = Safetensors.mat_of f4 "d4.sin" in
 
@@ -222,12 +220,11 @@ let () =
     gate "d4_cos" cos4 cos_ref 1e-5 1e-5;
     gate "d4_sin" sin4 sin_ref 1e-5 1e-5;
 
-    (* Verify the scaling actually changed frequencies (not identity) *)
-    let max_inv_diff = max_abs_diff_vec inv_freq_ref base_inv_freq_ref in
-    check (Printf.sprintf "d4_scaling_changes_frequencies (max_diff=%.3e)" max_inv_diff)
-      (max_inv_diff > 1e-4);
-
-    (* Verify llama3-scaled tables differ from base RoPE tables *)
+    (* Verify llama3-scaled tables differ from base RoPE tables. This
+       compares our scaled tables against our own base tables — both
+       sides the port's code — so it can catch an [llama3] path that
+       silently returns the base frequencies. (The file's own
+       inv_freq/frequency deltas are already covered by d4_cos/d4_sin.) *)
     let cos_base, _ =
       Rope.compute_angles ~base ~head_dim:head_dim4 ~ctx_len:ctx_len4
     in
