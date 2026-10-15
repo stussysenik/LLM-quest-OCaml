@@ -134,3 +134,131 @@ let shifted_text_logits ~(num_vision_tokens : int) (logits : mat) : mat =
   if num_vision_tokens < 1 || num_vision_tokens > s then
     invalid_arg (Printf.sprintf "Vlm.shifted_text_logits: num_vision_tokens=%d, seq=%d" num_vision_tokens s);
   Array.sub logits (num_vision_tokens - 1) (s - num_vision_tokens)
+
+(* ------------------------------------------------------------------ *)
+(* Caption generation                                                   *)
+(* ------------------------------------------------------------------ *)
+
+(** The sequence a caption starts from: the adapter's output and
+    **nothing else**.
+
+    [vlm_generation.py] sets [input_sequence = vision_embeddings] and
+    calls the decoder with [input_embedded=True]. Two consequences that
+    this reproduces and that [fused_embeddings] above does not:
+
+    - No text prompt. The model's first prediction is conditioned on the
+      image alone; the port has no tokenizer, so "no prompt" is also the
+      only thing expressible.
+    - **No positional embeddings anywhere.** [GPTModel.forward]'s
+      `x = x + pos_emb` sits inside `if not input_embedded:`, so the
+      decoder adds none. Compare training, where
+      [fused_embeddings] uses [Gpt.embed] and each text token carries a
+      baked-in position. So the generation path must *not* go through
+      [fused_embeddings] or [Gpt.add_pos]: doing so measures 1.36e-01
+      against the reference, which is rel ~1e-2 — enough to ruin a
+      caption, far too small for any structural check to catch.
+
+    Also worth stating because it looks like an omission: there is no
+    separator token between the end of the vision and the start of the
+    text. The reference trains without one ("we expect the VLM to start
+    generating text tokens right after the vision tokens"), so adding a
+    BOS here would be inventing a token the model has never seen. *)
+let vision_sequence (m : model) ~(image : Vit.image) : mat = vision_embeddings m ~image
+
+(** One prefill over the image and the first decode step's context.
+    Returns the full logits over the vision sequence; the caller reads the
+    last row, exactly as [vlm_generation.py] does with [logits[:, -1, :]].
+
+    [~context_length] truncates from the left, matching the reference's
+    [input_sequence[:, -context_length:]]. Truncating a cached run would
+    be wrong — the cache cannot be un-pushed — so it is asserted rather
+    than attempted: a sequence longer than the context is refused instead
+    of quietly decoding from a cache that no longer matches the
+    reference's window. *)
+let prefill_cached ~(context_length : int) (m : model) (cache : Kv_cache.t) ~(image : Vit.image) : mat =
+  let seq = vision_sequence m ~image in
+  let n_vision = Array.length seq in
+  if n_vision <> num_vision_tokens m then
+    invalid_arg
+      (Printf.sprintf "Vlm.prefill_cached: vision sequence has %d rows, expected %d" n_vision
+         (num_vision_tokens m));
+  if n_vision > context_length then
+    failwith
+      (Printf.sprintf
+         "Vlm.prefill_cached: image needs %d positions but context_length is %d — the reference \
+          would truncate the image away, and a KV cache cannot un-push what it has already seen"
+         n_vision context_length);
+  Gpt.prefill_from_emb_cached m.gpt cache seq
+
+(** One decode step: append the bare token embedding for [tok] (no
+    positional — the decoder places it at the cache length) and return the
+    next token's logits.
+
+    The bare embedding is [Gpt.tok_emb] directly rather than [Gpt.embed],
+    for the reason [vision_sequence] gives: during generation the
+    reference appends [vlm_model.emb_dict(next_token_id)] and lets
+    [input_embedded=True] add the position once. Using [Gpt.embed] would
+    add it twice. *)
+let decode_step_cached (m : model) (cache : Kv_cache.t) ~(tok : int) : vec =
+  if tok < 0 || tok >= m.gpt.Gpt.cfg.Config.vocab_size then
+    invalid_arg (Printf.sprintf "Vlm.decode_step_cached: token %d out of range" tok);
+  let row = Array.copy m.gpt.Gpt.tok_emb.(tok) in
+  Gpt.decode_from_emb_cached m.gpt cache [| row |]
+
+(** Greedy/tempered caption generation from an image, with a KV cache.
+
+    Mirrors [vlm_generation.loop] in [vlm_generation.py]: prefill over the
+    image, then repeatedly take the last position's logits, sample, and
+    feed the sampled token's embedding back.
+
+    Differences from the reference, both forced and both recorded rather
+    than hidden:
+
+    - **A cache.** The reference re-runs the whole sequence every step,
+      so it is quadratic in the caption length. The cached path is linear
+      and must produce the same tokens; gate G-c is exactly that claim.
+    - **No tokenizer.** The port returns token ids. Decoding to a string
+      is [tokenizer.decode]'s job and the port has no tokenizer — the
+      same boundary [Gpt2]'s generation parity already sits at.
+
+    [~on_token] is called after each token is appended and before the EOS
+    break, so a caller can observe the stream. [~eos_ids] reproduces the
+    stop contract of [Gpt.generate_cached]: the stopping token **is** part
+    of the result and nothing is decoded past it.
+
+    [rng] is explicit and [temp] defaults to 0.0 (greedy). The reference
+    defaults to [temp=1.0, top_p=0.9], which samples — and sampling is
+    not a function of the model, it is a function of a random stream that
+    PyTorch and OCaml do not share. Defaulting to greedy makes the
+    function deterministic and therefore gate-able, and a caller who wants
+    the reference's stochastic defaults passes them plus an [rng] they are
+    willing to lose reproducibility to. *)
+let generate_cached (rng : Random.State.t) ~(max_gen : int) ?(context_length : int = 1024)
+    ?(eos_ids : int list = []) ?(top_k : int option = None) ?(top_p : float option = None)
+    ?(min_p : float option = None) ?(temp : float = 0.0) ?on_token (m : model) ~(image : Vit.image) :
+    int array =
+  if max_gen <= 0 then invalid_arg "Vlm.generate_cached: max_gen must be positive";
+  let cache = Kv_cache.create ~num_layers:m.gpt.Gpt.cfg.Config.num_layers in
+  (* [cur] is always "the rows whose last row predicts the next token":
+     the whole vision sequence after prefill, a single row after each
+     decode step. Tracked by value rather than by index because the row
+     count changes from n_vision to 1 on the first decode, and an index
+     carried across that transition reads out of bounds. *)
+  let cur = ref (prefill_cached ~context_length m cache ~image) in
+  let last_row (mm : mat) = mm.(Array.length mm - 1) in
+  let out = ref [] in
+  let pos = ref 0 in
+  let finished = ref false in
+  while !pos < max_gen && not !finished do
+    let next = Sampling.sample ~top_k ~top_p ~min_p ~temp rng (last_row !cur) in
+    out := next :: !out;
+    (match on_token with Some f -> f !pos next | None -> ());
+    if List.mem next eos_ids then finished := true
+    else if !pos + 1 < max_gen then (
+      (* Only re-run the trunk when another token is wanted: after the
+         last one there is nothing to condition on, and pushing it would
+         leave the cache longer than the reference's would be. *)
+      cur := [| decode_step_cached m cache ~tok:next |]);
+    incr pos
+  done;
+  Array.of_list (List.rev !out)

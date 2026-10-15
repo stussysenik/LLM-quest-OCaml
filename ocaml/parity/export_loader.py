@@ -70,6 +70,18 @@ TEXT_LEN = 6
 ADAPTER_TYPE = "ffn"
 HIDDEN_SIZE_FACTOR = 4
 
+# Generation reference. `MAX_GEN` is 12 rather than the reference's 70:
+# a tiny random model rarely emits EOS, so the run would go the distance
+# and export 70 rows of logits to check a few. 12 steps is enough to
+# cross several decode steps and the cache boundary.
+MAX_GEN = 12
+MAX_GATED_STEPS = 7
+# A greedy argmax on a randomly-initialised model can land on any id, so
+# pinning an EOS the loop might never reach would silently drop the stop
+# contract from the gate. This is checked after export instead: the log
+# reports whether EOS was hit.
+EOS_ID = None
+
 
 def build_vit(g):
     torch.manual_seed(SEED)
@@ -175,6 +187,43 @@ def main(out_path):
     t["ref.fused"] = fused[0].clone()
     t["ref.logits"] = logits[0].clone()
     t["ref.vit_logits"] = vit_logits.clone()
+
+    # --- generation -------------------------------------------------------
+    # `vlm_generation.py`'s loop, reproduced literally:
+    #   seq = vision_embeddings            (no prompt, no positions)
+    #   loop: logits = gpt(seq, input_embedded=True)[:, -1, :]
+    #         tok = argmax(logits); seq = cat([seq, emb_dict(tok)])
+    # Note what is NOT here: `get_embeddings`, and therefore the extra
+    # positional the *training* path bakes into the text embeddings. The
+    # generation loop appends `emb_dict(tok)` bare and lets
+    # `input_embedded=True` place every row exactly once. A port that
+    # builds this sequence with `Vlm.fused_embeddings` double-counts
+    # positions and still produces plausible captions, which is why the
+    # gate below anchors on these tokens specifically.
+    with torch.no_grad():
+        seq = vision
+        greedy = []
+        step_logits = []
+        for _ in range(MAX_GEN):
+            lg = gpt(seq, input_embedded=True)[0, -1, :]
+            step_logits.append(lg.clone())
+            tok = int(torch.argmax(lg).item())
+            greedy.append(tok)
+            if tok == EOS_ID:
+                break
+            seq = torch.cat([seq, gpt.emb_dict.weight[tok].reshape(1, 1, -1)], dim=1)
+
+    t["ref.vision_seq"] = seq[0, :n_vit, :].clone()      # the prefill window
+    t["ref.prefill_last_logits"] = step_logits[0].clone()
+    t["ref.greedy_tokens"] = torch.tensor(greedy, dtype=torch.int64)
+    # Logits for the first few decode steps, so a gate can compare the
+    # *cached* path against the *uncached* one row by row rather than
+    # only through the argmax, which would hide a small error.
+    for i, lg in enumerate(step_logits[:MAX_GATED_STEPS]):
+        t[f"ref.step{i}_last_logits"] = lg.clone()
+
+    print(f"\ngeneration: {len(greedy)} greedy tokens (max {MAX_GEN})"
+          f"{' — EOS hit, stop contract exercised' if greedy and greedy[-1] == EOS_ID else ' — no EOS'}")
 
     n_conv = len([k for k in vit.state_dict() if "conv_proj" in k])
     print(f"\nviT state_dict: {len(vit.state_dict())} tensors (conv tensors are 4-D: {n_conv})")

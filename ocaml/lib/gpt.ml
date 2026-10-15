@@ -216,6 +216,103 @@ let prefill_cached (m : t) (cache : Kv_cache.t) ?(attn_mask : bool array option 
     and the new key is the only new entry. The causal mask is implicit
     in the cache here — recomputing a triangular mask would either drop
     the prefix (wrong) or double-count the current token (wrong). *)
+(* ------------------------------------------------------------------ *)
+(* KV-cache over caller-supplied embeddings                            *)
+(* ------------------------------------------------------------------ *)
+
+(** Add the learned positional embeddings to a sequence of *bare*
+    embeddings, positions [0 .. n-1].
+
+    This is what [GPTModel.forward(input_embedded=True)] does and it is
+    not the same thing as [embed]: [embed] adds token + position in one
+    step, whereas the `input_embedded` path takes embeddings the caller
+    has already built and adds positions on top. The two disagree, and
+    the multimodal generation path is built on the second one.
+
+    **Read [GPTModel.forward]'s docstring before assuming it is called.**
+    The `x = x + pos_emb` line sits *inside* `if not input_embedded:`, so
+    with `input_embedded=True` the decoder adds **no positional embedding
+    at all** — the comment above the branch says as much ("thus bypassing
+    token and positional embedding"). The two multimodal paths therefore
+    differ in a way that is not obvious from either one alone:
+
+    - training (`vlm_training_loop_simple`) builds text embeddings with
+      `vlm_engine.get_embeddings`, which is
+      [emb_dict(ids) + pos_emb_dict(arange(seq))]. Positions therefore
+      come baked in, starting at 0 for the *first text token* — they do
+      not account for the vision prefix, and the vision rows carry none.
+    - generation (`vlm_generation.py`) appends bare
+      [emb_dict(next_token_id)], so generated tokens carry no position
+      either.
+
+    So the reference's trained model sees positioned text and its
+    generated tokens see none. That is arguably a defect in the
+    reference; it is also unambiguous, and this port's job is to mirror
+    it. [add_pos] exists because it is the right thing for any caller that
+    wants positions, and **is not used on the `input_embedded` path** —
+    adding it there was measured as a 1.36e-01 error against the
+    reference's own logits, which is the size of the mistake rather than
+    the argument for it. *)
+let add_pos (m : t) (emb : mat) : mat =
+  let n = Array.length emb in
+  if n > Config.max_positions m.cfg then
+    invalid_arg "Gpt.add_pos: sequence exceeds max_positions";
+  Array.init n (fun i ->
+      let row = Array.copy emb.(i) in
+      let pe = m.pos_emb.(i) in
+      for j = 0 to Array.length row - 1 do
+        row.(j) <- row.(j) +. pe.(j)
+      done;
+      row)
+
+(** Prefill over a sequence of bare embeddings, pushing each layer's K/V
+    into [cache] (which must be fresh). Returns full logits.
+
+    The cache must be empty *and* the sequence must start at position 0 —
+    [add_pos] places rows at [0 .. n-1] with no offset, so resuming from
+    a partly-filled cache here would silently re-place the prefix. That
+    is what [decode_from_emb_cached] is for. *)
+let prefill_from_emb_cached ?(attn_mask : bool array option = None) (m : t) (cache : Kv_cache.t)
+    (emb : mat) : mat =
+  if Kv_cache.past_len cache 0 <> 0 then
+    invalid_arg "Gpt.prefill_from_emb_cached: cache must be fresh";
+  (* No [add_pos]: see the header. `input_embedded=True` places nothing. *)
+  let x = ref emb in
+  List.iteri
+    (fun li blk ->
+      let kv = Kv_cache.peek cache li in
+      let out, kh, vh = Block.block_forward_kv ~attn_mask ~kv blk !x in
+      Kv_cache.push cache ~layer_idx:li ~keys:kh ~values:vh;
+      x := out)
+    m.blocks;
+  Attention.linear_forward_batch m.lm_head (Norm.layer_norm m.final_ln !x)
+
+(** One decode step over a single **bare** embedding — no position added,
+    for the reason [prefill_from_emb_cached]'s header gives.
+
+    Same mask reasoning as [decode_step_cached]: every cached key is valid
+    history and the new key is the only new entry, so the mask is all
+    true. Recomputing a triangular mask over the prefix would drop the
+    prefix; applying a full causal mask would double-count the current
+    token. *)
+let decode_from_emb_cached (m : t) (cache : Kv_cache.t) (emb : mat) : vec =
+  if Array.length emb <> 1 then
+    invalid_arg (Printf.sprintf "Gpt.decode_from_emb_cached: expected 1 row, got %d" (Array.length emb));
+  let pos = Kv_cache.past_len cache 0 in
+  if pos >= Config.max_positions m.cfg then
+    invalid_arg "Gpt.decode_from_emb_cached: position exceeds max_positions";
+  ignore pos; (* the cache length is the sequence index, not a position embedding *)
+  let x = ref [| Array.copy emb.(0) |] in
+  List.iteri
+    (fun li blk ->
+      let kv = Kv_cache.peek cache li in
+      let mask = Array.make (Kv_cache.past_len cache li + 1) true in
+      let out, kh, vh = Block.block_forward_kv ~attn_mask:(Some mask) ~kv blk !x in
+      Kv_cache.push cache ~layer_idx:li ~keys:kh ~values:vh;
+      x := out)
+    m.blocks;
+  (Attention.linear_forward_batch m.lm_head (Norm.layer_norm m.final_ln !x)).(0)
+
 let decode_step_cached (m : t) (cache : Kv_cache.t) (tok : int) (pos : int) : vec =
   let x = ref (embed_with_pos m [| tok |] [| pos |]) in
   List.iteri

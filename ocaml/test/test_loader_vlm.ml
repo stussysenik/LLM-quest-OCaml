@@ -248,5 +248,114 @@ let () =
            (Safetensors.subset f ~prefix:"gpt.")
            (Config.max_positions gpt_cfg + 1) 0));
 
+  (* ---------------------------------------------------------------- *)
+  (* G: the caption-generation path.                                   *)
+  (* ---------------------------------------------------------------- *)
+  Printf.printf "\nG caption generation (vlm_generation.py's loop)\n";
+  let n_vit = Vlm.num_vision_tokens m in
+  let cache = Kv_cache.create ~num_layers:gpt_cfg.Config.num_layers in
+
+  (* G-a: the prefill window is the adapter's output alone, carried
+     through with **no** positional embedding — `GPTModel.forward`'s
+     `x = x + pos_emb` lives inside `if not input_embedded:`.
+
+     This is the single most expensive line to get wrong in the whole
+     multimodal path. Adding positions here measures 1.36e-01 against the
+     reference (rel ~1e-2): big enough to wreck a caption, small enough
+     that no shape assertion, no key-set check and no range check
+     notices. It was found by running this gate, not by reading the code
+     twice. *)
+  let prefill = Vlm.prefill_cached ~context_length:64 m cache ~image in
+  gate_vec "G-a prefill last-row logits (vision only, no positions)"
+    prefill.(Array.length prefill - 1)
+    (Safetensors.vec_of_f64 f "ref.prefill_last_logits") 1e-9;
+
+  (* G-b: the cached decode must equal a full re-forward. This is the
+     claim that makes the cache worth having — the reference re-runs the
+     whole sequence every step. Checked per step, against the reference's
+     own per-step logits, so an argmax that happens to agree cannot hide a
+     small error. *)
+  let ref_tokens = Safetensors.i64_array_of f "ref.greedy_tokens" |> Array.map Int64.to_int in
+  let n_gated = min 6 (Array.length ref_tokens - 1) in
+  let b_ok = ref true and b_worst = ref 0.0 in
+  let cache_b = Kv_cache.create ~num_layers:gpt_cfg.Config.num_layers in
+  ignore (Vlm.prefill_cached ~context_length:64 m cache_b ~image : mat);
+  for i = 0 to n_gated - 1 do
+    let logits = Vlm.decode_step_cached m cache_b ~tok:ref_tokens.(i) in
+    let refm = Safetensors.vec_of_f64 f (Printf.sprintf "ref.step%d_last_logits" (i + 1)) in
+    let d = max_abs_vec logits refm in
+    if d > !b_worst then b_worst := d;
+    if d > 1e-9 then b_ok := false;
+    (* The token the reference picked must be this step's argmax. *)
+    let arg = ref (-1) and best = ref neg_infinity in
+    Array.iteri (fun j v -> if v > !best then (best := v; arg := j)) refm;
+    if !arg <> ref_tokens.(i + 1) then b_ok := false
+  done;
+  Printf.printf "  %-40s max_abs_diff=%.3e over %d decode steps\n" "G-b cached == reference"
+    !b_worst n_gated;
+  check "G-b cached decode step == reference logits and argmax" !b_ok;
+
+  (* G-c: the whole loop, token for token, greedy. *)
+  let rng = Random.State.make [| 7 |] in
+  let ours = Vlm.generate_cached rng ~max_gen:(Array.length ref_tokens) ~context_length:64 m ~image in
+  let same = Array.length ours = Array.length ref_tokens in
+  let first_diff =
+    let d = ref (-1) in
+    for i = 0 to min (Array.length ours) (Array.length ref_tokens) - 1 do
+      if ours.(i) <> ref_tokens.(i) && !d < 0 then d := i
+    done;
+    !d
+  in
+  Printf.printf "  %-40s ours=[%s] ref=[%s]\n" "G-c greedy token ids"
+    (String.concat ";" (Array.to_list (Array.map string_of_int ours)))
+    (String.concat ";" (Array.to_list (Array.map string_of_int ref_tokens)));
+  check "G-c generate_cached reproduces the reference tokens" (same && first_diff < 0);
+
+  (* G-d: the stop contract. The reference appends the stopping token and
+     breaks *without* decoding past it, so with eos = the first reference
+     token the answer must be exactly that one token. This is not a
+     synthetic case: [eos_ids] is set from the reference's own first
+     token, so the expected output is a real number the export produced. *)
+  let eos_tok = ref_tokens.(0) in
+  let stopped =
+    Vlm.generate_cached rng ~max_gen:12 ~context_length:64 ~eos_ids:[ eos_tok ] m ~image
+  in
+  Printf.printf "  %-40s got %d token(s), first=%d (eos=%d)\n" "G-d stops on EOS" (Array.length stopped)
+    stopped.(0) eos_tok;
+  check "G-d EOS is appended and the loop stops there" (Array.length stopped = 1 && stopped.(0) = eos_tok);
+
+  (* G-e: anti-gate. The bare vision sequence must NOT match once
+     positional embeddings are added. This is the mistake G-a exists to
+     catch, re-run as a divergence check so it is visibly non-zero rather
+     than merely "G-a passes" — a positive gate and an anti-gate on the
+     same quantity, which is the shape that catches a gate written so
+     loosely both would agree.
+
+     Note this is adding positions *once* to a sequence that should have
+     none, not double-counting. Double-counting is a different mistake
+     (training's [fused_embeddings] on the generation path) and is
+     strictly worse; it is not separately gated because it is a
+     superset of this one and the reason to be suspicious is the same. *)
+  let wrong_cache = Kv_cache.create ~num_layers:gpt_cfg.Config.num_layers in
+  let wrong_seq = Vlm.vision_embeddings m ~image in
+  let with_positions = Gpt.add_pos m.Vlm.gpt wrong_seq in
+  let wrong_logits = Gpt.prefill_from_emb_cached m.Vlm.gpt wrong_cache with_positions in
+  let d_wrong =
+    max_abs_vec wrong_logits.(Array.length wrong_logits - 1)
+      (Safetensors.vec_of_f64 f "ref.prefill_last_logits")
+  in
+  Printf.printf "  %-40s max_abs_diff=%.3e (must exceed 1e-06)\n" "G-e positions added by the port diverge"
+    d_wrong;
+  check "G-e a port that adds positions is rejected" (d_wrong > 1e-6);
+
+  (* G-f: a context_length too small to hold the image must be refused
+     rather than silently truncating the image away — the reference
+     would truncate, and a KV cache cannot un-push what it has seen. *)
+  check "G-f a context too small for the image is refused"
+    (try
+       ignore (Vlm.prefill_cached ~context_length:(n_vit - 1) m (Kv_cache.create ~num_layers:2) ~image);
+       false
+     with Failure _ -> true);
+
   Printf.printf "\n%d passed, %d failed\n" !passed !failed;
   exit (if !failed = 0 then 0 else 1)
