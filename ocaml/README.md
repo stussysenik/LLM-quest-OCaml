@@ -105,8 +105,9 @@ would notice.
 
 ## Running everything
 
-`make ci` is the one-command green-tree proof: **269 PASS across 14
-suites**, plus 15 PyTorch parity stages, a 12-layer KV cross-check and
+`make ci` is the one-command green-tree proof: **274 PASS across 14
+suites**, plus 14 GPT-2 parity stages (embeddings, 11 blocks + final
+norm, logits), a 12-layer KV cross-check and
 the Llama layout/logits boundary check. About two minutes on one core.
 
 ```bash
@@ -119,8 +120,8 @@ cd ocaml && make ci
 | `test_batched` | 9 | batch ≡ single |
 | `test_kv` | 9 | KV-cache invariants |
 | `test_loader` | 16 | GPT-2/HF loader + `[out, in]` layout |
-| `test_norm` | 13 | `LlamaRMSNorm` |
-| `test_mlp` | 19 | `LlamaMLP` |
+| `test_norm` | 15 | `LlamaRMSNorm`, and torch's fp64 kernel |
+| `test_mlp` | 22 | `LlamaMLP`, fp32 and fp64 |
 | `test_rope` | 13 | `RoPE` + `llama3` scaling |
 | `test_gqa` | 18 | `LlamaAttention` + this repo's own |
 | `test_vit` | 25 | `ViTModel` |
@@ -133,7 +134,7 @@ cd ocaml && make ci
 ### Generating the references
 
 The PyTorch stages need reference files, generated **once** against the
-pinned stack in `parity/requirements.txt` (~670 MB, none tracked in git).
+pinned stack in `parity/requirements.txt` (~635 MB, none tracked in git).
 torch goes in a separate step, from the CPU index only — the reason is in
 `parity/requirements.txt`'s header and is worth reading before changing it.
 
@@ -173,7 +174,8 @@ Two conventions that are easy to get backwards, both load-bearing:
   and its tolerance is set by the less precise of the two. Against an
   fp32 reference the gates breached at ~1e-6 — because *PyTorch disagreed
   with its own fp64 run by 2.3e-6*. Moving the activations to fp64 took
-  every stage to ~1e-13 and the tolerance to **1e-9**.
+  every stage to between 0.0 (the embedding lookup) and 2.3e-12, and the
+  tolerance to **1e-9**.
 - **The inputs are stored next to the outputs.** So a gate cannot pass by
   comparing the port against its own idea of what the input was.
 

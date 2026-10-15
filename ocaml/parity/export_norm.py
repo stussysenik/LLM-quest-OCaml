@@ -12,13 +12,28 @@ hidden=16 the fp32 reduction over the last dim has 16 terms, at hidden=2048
 it has 2048, and an accumulation-order mistake grows with the term count
 while staying under the tolerance at 16.
 
-Writes (all F32, batch dim squeezed — RMSNorm is per-token over the last
-dim, so [batch, seq, hidden] and [batch*seq, hidden] are the same
-computation and the squeeze only keeps the reader 2D):
-  d1.<case>.x     [batch*seq, hidden]
-  d1.<case>.w     [hidden]
-  d1.<case>.eps   [1]        — 1e-6, the tiny-random Llama config's rms_norm_eps
-  d1.<case>.ref   [batch*seq, hidden]  — LlamaRMSNorm(x) with weight w
+Writes (batch dim squeezed — RMSNorm is per-token over the last dim, so
+[batch, seq, hidden] and [batch*seq, hidden] are the same computation and
+the squeeze only keeps the reader 2D):
+  d1.<case>.x      [batch*seq, hidden]  F32  — the input, as fed to both refs
+  d1.<case>.w      [hidden]             F32
+  d1.<case>.eps    [1]                  F32  — the tiny-random Llama config's eps
+  d1.<case>.ref    [batch*seq, hidden]  F32  — LlamaRMSNorm(x, w), unpatched
+  d1.<case>.ref64  [batch*seq, hidden]  F64  — torch.nn.functional.rms_norm
+
+Two references, because LlamaRMSNorm.forward hard-casts:
+
+    hidden_states = hidden_states.to(torch.float32)
+
+so even handed a float64 input it computes in float32, and `.ref` carries an
+fp32 island. Measured for the mid case, that island is 7.767e-07 absolute —
+which was, to every printed digit, what gate D1a reported. The gate was
+measuring HF's dtype policy, and its margin against a 1e-6 bound was 1.29x,
+so it would have flipped green→red on a host whose BLAS reduces in a
+different order. `.ref64` is torch's own kernel, which computes in the input
+dtype: gating against it separates "our kernel is wrong" from "HF cast the
+input", and lets D1a calibrate its bound from the island instead of from a
+constant nobody re-derives. See STUDY.md §1.
 
 Usage:
     python ocaml/parity/export_norm.py [out.safetensors]
@@ -62,16 +77,31 @@ def export_case(name, hidden, tensors):
         norm.weight.copy_(w)
         ref = norm(x)
 
+    x2 = x.reshape(BATCH * SEQ, hidden)
     y = ref.reshape(BATCH * SEQ, hidden).cpu().clone().contiguous()
+
+    # Torch's own kernel, in the input dtype — no cast to fp32 anywhere in
+    # it. Same fp32 inputs widened to fp64, so the only difference from
+    # `ref` is HF's cast and the arithmetic precision that follows from it.
+    with torch.no_grad():
+        y64 = (
+            torch.nn.functional.rms_norm(x2.double(), (hidden,), w.double(), eps)
+            .cpu()
+            .clone()
+            .contiguous()
+        )
+    island = (y.double() - y64).abs().max().item()
     print(
         f"{name}: x{tuple(x.shape)} -> {tuple(y.shape)}  w{hidden}  eps={eps:g}  "
-        f"|ref|max={y.abs().max():.4f}  |x|max={x.abs().max():.4f}"
+        f"|ref|max={y.abs().max():.4f}  |x|max={x.abs().max():.4f}  "
+        f"fp32-island={island:.3e}"
     )
 
-    tensors[f"d1.{name}.x"] = x.reshape(BATCH * SEQ, hidden).cpu().clone().contiguous()
+    tensors[f"d1.{name}.x"] = x2.cpu().clone().contiguous()
     tensors[f"d1.{name}.w"] = w.cpu().clone().contiguous()
     tensors[f"d1.{name}.eps"] = torch.tensor([eps])
     tensors[f"d1.{name}.ref"] = y
+    tensors[f"d1.{name}.ref64"] = y64
 
 
 def main(out_path):

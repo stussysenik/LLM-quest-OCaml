@@ -99,12 +99,13 @@ let () =
     let w = Safetensors.vec_of f (Printf.sprintf "d1.%s.w" name) in
     let eps = (Safetensors.vec_of f (Printf.sprintf "d1.%s.eps" name)).(0) in
     let ref = Safetensors.mat_of f (Printf.sprintf "d1.%s.ref" name) in
+    let ref64 = Safetensors.mat_of_f64 f (Printf.sprintf "d1.%s.ref64" name) in
     if Array.length x = 0 || Array.length w <> Array.length x.(0) then
       failwith
         (Printf.sprintf "test_norm: case %s: w has %d entries, x's last dim is %d" name
            (Array.length w)
            (if Array.length x = 0 then 0 else Array.length x.(0)));
-    (x, w, eps, ref)
+    (x, w, eps, ref, ref64)
   in
 
   (* eps is [Config.norm_eps] of the tiny-random Llama config, so gate D1a
@@ -114,13 +115,40 @@ let () =
   let eps_cfg = Config.norm_eps cfg in
 
   (* ---------------- D1a: vs LlamaRMSNorm ---------------- *)
+  (* The reference is the module HF actually runs, unpatched — including
+     its `hidden_states.to(torch.float32)`. That cast is not a detail of
+     the gate's setup, it is what the module does, so this gate's job is
+     "does the port track that module", not "is the port accurate": the
+     accuracy claim is D1e's, against torch's fp64 kernel.
+
+     The bound is therefore derived rather than written down. `island` is
+     measured here from the two references in the file, and the port has
+     to land within 2x of it — |port - ref| <= |port - ref64| + island,
+     so 2x is a real margin over anything the port can contribute. On
+     this machine the island *is* the entire error D1a reports, which is
+     how it was identified: a 1e-6 constant gave a 1.29x margin that
+     would have gone red on a host with a different BLAS reduction
+     order. See STUDY.md §1. *)
   Printf.printf "D1a: rms_norm vs LlamaRMSNorm (eps=%.9g from Config.norm_eps)\n" eps_cfg;
+  Printf.printf
+    "D1e: rms_norm vs torch.nn.functional.rms_norm (fp64 kernel, no dtype cast)\n";
   let run_case label =
-    let x, w, eps_ref, ref = load_case label in
+    let x, w, eps_ref, ref, ref64 = load_case label in
     let ours = Norm.rms_norm w ~eps:eps_cfg x in
-    gate label ours ref 1e-6 1e-6;
-    Printf.printf "    hidden=%d eps_in_file=%.9g |ref|max=%.3e\n" (Array.length w) eps_ref
-      (mat_max_abs ref)
+    let island = max_abs_diff_mat ref ref64 in
+    let bound = Float.max (2.0 *. island) 1e-12 in
+    gate label ours ref bound bound;
+    Printf.printf
+      "    hidden=%d eps_in_file=%.9g |ref|max=%.3e fp32-island=%.3e bound=%.3e\n"
+      (Array.length w) eps_ref (mat_max_abs ref) island bound;
+    (* The port is fp64 throughout and torch's kernel computes in the
+       input dtype, so with the fp32 cast out of the way this is two fp64
+       implementations of one expression: summation order only, measured
+       at 4.4e-16 (hidden=16) and 2.0e-14 (hidden=2048, where the mean
+       has 2048 terms). 1e-12 is ~50x the mid reading — the same ratio
+       the full-model fp64 stages use — and still five orders under the
+       island, so an fp32 value leaking into the port cannot hide here. *)
+    gate (label ^ " (fp64)") ours ref64 1e-12 1e-12
   in
   run_case "tiny";
   run_case "mid";
@@ -130,7 +158,7 @@ let () =
      them exhaustive. Same (x, w) as D1a; eps placement is D1c's half,
      which the identity below also pins — it holds only with eps inside
      the sqrt. *)
-  let x, w, _, _ = load_case "tiny" in
+  let x, w, _, _, _ = load_case "tiny" in
   let d = Array.length w in
   let ln_of ~scale ~shift ~eps_placement =
     Norm.{ scale; shift; eps = eps_cfg; eps_placement }
@@ -203,7 +231,7 @@ let () =
     (Config.norm_eps Config.gpt_config_124m = 1e-5
     && Config.norm_eps Config.gpt_tiny_test_config = 1e-5
     && Config.norm_eps Config.llama_tiny_test_config = 1e-5);
-  let _, _, eps_file, _ = load_case "tiny" in
+  let _, _, eps_file, _, _ = load_case "tiny" in
   (* fp32 precision, not fp64: the file stores eps as F32, so the value
      that came back is the config's 1e-6 to within one fp32 ulp (~2.5e-8
      relative). Asking for tighter would be asking the file to hold a

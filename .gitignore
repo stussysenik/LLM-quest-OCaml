@@ -206,6 +206,8 @@ ocaml/test_gqa
 ocaml/test_vit
 ocaml/test_vlm
 ocaml/test_loader_vlm
+ocaml/test_image
+ocaml/test_loss
 ocaml/demo
 ocaml/parity_check
 ocaml/parity_kv

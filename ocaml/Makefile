@@ -91,7 +91,12 @@ parity_kv: $(LIB) test/parity_kv.ml
 parity_gen: $(LIB) test/parity_gen.ml
 	ocamlopt -I lib -o parity_gen $(LIB) test/parity_gen.ml
 
-test: test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm
+# Every suite is listed as a prerequisite, not just run below. Leaving one
+# out means `make ci` works on a dirty tree (the binary is already there)
+# and fails on a clean one — which is exactly the opposite of what a CI
+# target should do, and is invisible until someone runs `make clean`.
+test: test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa \
+      test_vit test_vlm test_loader_vlm test_image test_loss
 	./test_all && ./test_batched && ./test_kv && ./test_loader $(REF_LLAMA) $(REF_LLAMA_TIED)
 	@test -f $(REF_NORM) || (echo "norm reference not found: $(REF_NORM) -- run: python ocaml/parity/export_norm.py $(REF_NORM)" && exit 1)
 	./test_norm $(REF_NORM)

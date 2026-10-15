@@ -73,9 +73,9 @@ it with the next. `make ci` stays green after every row.
 | B | `test/parity.ml` → parameterized (`run ~family`, family-erased `runnable`); `export_reference.py --family {gpt2,llama}` | ✅ B1 GPT-2 parity **bit-identical** through the new path; B2 `make ci` gate count unchanged, 101.9s → measured; B3 `--family llama` export runs, prints the `hidden_states[-1]` convention + `tie_word_embeddings`; B4 `run`'s body has no family branch |
 | C | `hf_loader.ml` split → `gpt2_loader.ml` + `llama_loader.ml` + `llama.ml` (`safetensors.ml` stays shared, gains `get_tensor`/`require_absent`/`assert_exact_keys`) | ✅ C1 key set + every shape match the config; C2 loaded params == file's 1032272; C3 three wrong-config variants each raise naming the tensor; C4 (15 gates total) tie aliases (physically, `==`) / untied-without-head raises / tie-with-head raises; C5 `--family llama` loads weights then stops at step D; GPT-2 parity **bit-identical** through the rewritten loader |
 | L | **Weight layout → `[out, in]` project-wide.** `Attention.linear.w` becomes `(out, in)`; `Tensor.linear_fwd` is the one linear op and has no layout parameter; `Gpt2_loader` transposes `Conv1D` from `(in, out)` at load; `Llama_loader` unchanged (already `nn.Linear` order) | ✅ GPT-2 parity **bit-identical** — every `max_abs_diff` unchanged to the digit, which is the proof the refactor computes the same function; from-scratch weights *and* logits bit-identical as well; new gate `layout_gpt2_out_in` / `layout_llama_out_in` re-derives each `out` from the config, covering the square projections shape assertions cannot |
-| D1 | RMSNorm | ✅ vs `LlamaRMSNorm` at hidden 16 **and** 2048 (3.3e-7 / 7.8e-7, dual abs+rel 1e-6); zero-mean identity vs LayerNorm exact (0.0); shift-sensitive where LayerNorm is shift-invariant; zero weight zeroes the output; eps placement changes the result (2.4e-6) both ways; `Config.norm_eps` family-specific (1e-6 Llama / 1e-5 GPT-2) and it is the value the op ran with. **13 gates**, each proved to bite by mutating the op |
-| D2 | SwiGLU | ✅ vs `LlamaMLP` at hidden 16/inter 64 and the square 256/256 (8.0e-7 / 1.8e-6, dual abs+rel 1e-5 — the reference is fp32; mid is square on purpose so a transposed `down_proj` fails *silently* rather than raising); zero input zeroes the op and not the GPT-2 FFN (no bias); up path load-bearing; silu stable (naive sigmoid caught at -710); `Config.ffn_inner` is `intermediate_size` (128 ≠ 4×64 on tiny_test) and is the shape D2a's weights were checked against; GELU-on-the-gate changes the function. **19 gates**, all six mutations ran against the committed gates — each bites its own gate |
-| D3 | RoPE, base | ✅ `lib/rope.ml`, `parity/export_rope.py`, `test/test_rope.ml`. D3a vs `RoPE.apply` (9.8e-8 / 8.6e-8 abs, fp32 ref); D3b relative-position invariance on the *same* q/k vectors at shifted positions (3.3e-16); D3c explicit 2D rotation matrix ≡ apply (exact); D3d `position_ids=[p]` ≡ full-forward row p (exact, 6.0e-8 vs ref). **9 gates**, 3 mutations run against them |
+| D1 | RMSNorm | ✅ Two references now, because `LlamaRMSNorm.forward` hard-casts to fp32. (i) vs that module, unpatched: 3.3e-7 / 7.8e-7 — which is **entirely the cast**, matched to every printed digit — with the bound *derived* from the measured fp32 island (2x it: 6.7e-7 / 1.6e-6) instead of the old written-down 1e-6 whose margin was 1.29x; (ii) vs `torch.nn.functional.rms_norm` in fp64: 4.4e-16 / 2.0e-14 at 1e-12. Mutation: rounding the port's output to fp32 **passes** (i) and **breaches** (ii) at 1.8e-7 / 3.4e-7 — the two gates do different jobs. Plus zero-mean identity vs LayerNorm exact (0.0); shift-sensitive where LayerNorm is shift-invariant; zero weight zeroes the output; eps placement changes the result (2.4e-6) both ways; `Config.norm_eps` family-specific (1e-6 Llama / 1e-5 GPT-2) and it is the value the op ran with. **15 gates** |
+| D2 | SwiGLU | ✅ Two references. `LlamaMLP.forward` has **no** dtype cast — it computes in whatever it is handed — so its fp32 reference was an export choice, not the module's behaviour: it bounded the gate at 1e-5 while the port computes in fp64. So (i) vs the fp32 module, bound derived from the measured island (7.97e-7 / 1.77e-6 -> 1.6e-6 / 3.5e-6), and (ii) vs the same module in float64: 4.4e-16 / 2.2e-15 at 1e-12. Mutation: rounding the port to fp32 passes (i), breaches (ii). Also the same treatment for the silu grid (`d2.silu.ref64`). Mid is square on purpose so a transposed `down_proj` fails *silently* rather than raising; zero input zeroes the op and not the GPT-2 FFN (no bias); up path load-bearing; silu stable (naive sigmoid caught at -710); `Config.ffn_inner` is `intermediate_size` (128 ≠ 4×64 on tiny_test) and is the shape D2a's weights were checked against; GELU-on-the-gate changes the function. **19 gates**, all six mutations ran against the committed gates — each bites its own gate |
+| D3 | RoPE, base | ✅ `lib/rope.ml`, `parity/export_rope.py`, `test/test_rope.ml`. D3a vs `RoPE.apply` (9.8e-8 / 8.6e-8 abs, fp32 ref — and fp32 is *the implementation*: `llm_quest/common/rope.py` asserts `dtype == torch.float32` and disables autocast for the angle computation, so unlike D2 this is faithful rather than an export choice); D3b relative-position invariance on the *same* q/k vectors at shifted positions (3.3e-16); D3c explicit 2D rotation matrix ≡ apply (exact); D3d `position_ids=[p]` ≡ full-forward row p (exact, 6.0e-8 vs ref). **9 gates**, 3 mutations run against them |
 | D4 | RoPE, `llama3` scaling | ✅ `compute_angles_llama3` vs `_compute_llama3_parameters` on the frequency table alone (2.7e-7 / 5.0e-7, fp32 ref); scaling provably non-identity (7.9e-4) and provably differs from base RoPE (4.6e-4). **4 gates** added, 13 total |
 | D5 | GQA | ✅ `parity/export_gqa.py`, `test/test_gqa.ml`, `GroupedQueryAttention` in `lib/attention.ml`. D5a vs `LlamaAttention` (eager), D5b vs this repo's own `llama_attention.py`; D5c the *anti*-gate — grouping is a permutation, so a repeat-tiling implementation must provably **disagree** (>1e-3) and the true one must be the closer match, which is the only gate that can catch an implementation that is accidentally right; D5d cache sized by `Config.kv_heads`, and a wide `num_heads` cache is **rejected** by both the cache constructor and `forward` rather than silently reshaped; D5e `num_repeat == 1` collapses GQA to plain MHA identically; D5f q/k/v carry no bias, `o_proj` does, and a zero bias ≡ no bias. **18 gates** |
 | E | tiny-random Llama parity | ✅ **Complete.** `Llama.forward_hidden_states` composes D1+D2+D3/D4+D5; `parity.ml` gained `check_llama_layout` (Llama's own expectations, since K/V are `kv_heads * head_dim` wide, not `num_heads * head_dim`). `llama_ref` carries `hidden.0/1/2` + `logits`, and `make ci`'s `parity-llama-forward` gates **every one** plus the layout gate, at 1e-9. This row previously read "🔶 E1 only — the remaining stages land after E". That was true when written, stopped being true at `7290c0a`, and was not updated because nothing failed while it was wrong. |
@@ -322,15 +322,42 @@ that *was* brought across.
   | stage | before (fp32 ref) | after (fp64 ref) |
   |---|---|---|
   | embeddings | 9.9e-6 | **0.0 exactly** |
-  | block_0 | 3.5e-4 | 9.9e-14 |
-  | block_11_lnf | 3.6e-4 | 1.4e-13 |
-  | logits | 2.4e-4 | 1.7e-13 |
+  | block_0 | 3.5e-4 | 1.4e-13 |
+  | blocks 1–10 | 3.6e-4 | 1.3e-12 … 2.3e-12 |
+  | block_11_lnf | 3.6e-4 | 1.7e-13 |
+  | logits | 2.4e-4 | 4.4e-13 |
 
-  Every gate moved from 1e-6/1e-5 to **1e-9** — seven orders of magnitude
-  tighter than the gate it replaces, and now the same number on any
-  machine instead of a host-dependent one. The dual abs+rel criterion
+  (The "after" column is what `make ci` prints on this machine; the error
+  grows through the stack as expected and stays four orders under the
+  1e-9 gate.)
+
+  Every *parity* stage moved from 1e-6/1e-5 to **1e-9** — seven orders of
+  magnitude tighter than the gate it replaces, and now the same number on
+  any machine instead of a host-dependent one. The dual abs+rel criterion
   survives; what changed is that the reference stopped being the least
   accurate thing in the comparison.
+
+  **Scope, because the distinction matters.** This covers the full-model
+  stages — GPT-2, the Llama family, and the multimodal references — where
+  the reference is an exported model run. The per-operator probes
+  (D1…D5) are a different case and are now split by whether fp32 is the
+  *implementation's* behaviour or the export's choice:
+
+  | probe | fp32 reference is… | treatment |
+  |---|---|---|
+  | D1 RMSNorm | HF's own cast (`hidden_states.to(torch.float32)`) | kept unpatched, bound derived from the measured island; **plus** an fp64 gate vs torch's kernel |
+  | D2 SwiGLU | only the export's choice — `LlamaMLP` has no cast | fp64 reference added, both gates ship |
+  | D3 RoPE | the implementation's: `rope.py` asserts `float32` and disables autocast | kept; faithful |
+  | D4 llama3 angles | the implementation's: `_compute_llama3_parameters` is fp32 | kept; faithful |
+  | D5 GQA | the implementation's: HF eager attention + `finfo(float32).min` mask | kept; faithful |
+
+  The D1 finding is worth stating plainly, because it is the same defect
+  as the one above at a smaller scale: the gate read 7.767e-07 and the
+  fp32 island is 7.767e-07 — *to every printed digit*. The gate was
+  measuring HF's dtype policy, and its 1.29x margin against a
+  written-down 1e-6 would have gone green→red on a host whose BLAS
+  reduces in a different order. Deriving the bound from the island (and
+  shipping the fp64 companion) is what makes that impossible.
 
 - **A gate that cannot fail is not a gate.** D3b was written wrong the
   first time — it compared `q(i)` against `q(i+d)` from different random

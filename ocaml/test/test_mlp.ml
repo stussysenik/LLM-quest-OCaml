@@ -68,14 +68,18 @@ let max_abs_diff_vec (a : Tensor.vec) (b : Tensor.vec) : float =
   !m
 
 (** The numeric stage line, in [parity.ml]'s format and with its dual
-    abs+rel criterion. The dual gate is not decoration: the reference is
-    fp32 — [LlamaMLP] casts to float32 before reducing — so where |y|
-    reaches ~2, one fp32 ulp is already ~1e-7 absolute and the
-    accumulation noise over 512 terms is ~1e-6, which a flat absolute
-    gate would either measure as the reference's own rounding or fail
-    on. The relative criterion pins the computation; the absolute one
-    still catches a whole-tensor shift that relative error hides at
-    small magnitudes. *)
+    abs+rel criterion.
+
+    [LlamaMLP.forward] is `down_proj(act_fn(gate_proj(x)) * up_proj(x))`
+    with no dtype cast in it — unlike [LlamaRMSNorm], it computes in
+    whatever dtype it is handed. So the fp32 reference this file
+    originally gated against was a choice made in the export, not a
+    property of the module, and it bounded the gate at ~1e-6 while the
+    OCaml side computes in fp64 throughout. Both references ship now:
+    `.ref` (fp32, what a real fp32 checkpoint would produce) and `.ref64`
+    (the same module in float64). The fp32 gate's bound is derived from
+    the measured gap between them rather than written down; the accuracy
+    claim is the fp64 gate's. See STUDY.md §1. *)
 let gate name ours refm abs_tol rel_tol =
   let diff = max_abs_diff_mat ours refm in
   let refmag = mat_max_abs refm in
@@ -107,25 +111,29 @@ let () =
     let w_up = Safetensors.mat_of f (Printf.sprintf "d2.%s.up_proj" name) in
     let w_down = Safetensors.mat_of f (Printf.sprintf "d2.%s.down_proj" name) in
     let ref = Safetensors.mat_of f (Printf.sprintf "d2.%s.ref" name) in
+    let ref64 = Safetensors.mat_of_f64 f (Printf.sprintf "d2.%s.ref64" name) in
     if Array.length x = 0 || Array.length w_gate = 0 then failwith "test_mlp: empty case";
     if Array.length w_gate.(0) <> Array.length x.(0) then
       failwith "test_mlp: gate_proj's d_in does not match x's last dim";
-    (x, w_gate, w_up, w_down, ref)
+    (x, w_gate, w_up, w_down, ref, ref64)
   in
 
   (* ---------------- D2a: vs LlamaMLP ---------------- *)
   Printf.printf "D2a: swiglu vs LlamaMLP\n";
   let run_case label =
-    let x, w_gate, w_up, w_down, ref = load_case label in
+    let x, w_gate, w_up, w_down, ref, ref64 = load_case label in
     let ours = Mlp.forward Mlp.{ gate_proj = w_gate; up_proj = w_up; down_proj = w_down; } x in
-    gate label ours ref 1e-5 1e-5;
-    Printf.printf "    hidden=%d intermediate=%d |ref|max=%.3e\n" (Array.length x.(0))
-      (Array.length w_gate) (mat_max_abs ref)
+    let island = max_abs_diff_mat ref ref64 in
+    let bound = Float.max (2.0 *. island) 1e-12 in
+    gate label ours ref bound bound;
+    Printf.printf "    hidden=%d intermediate=%d |ref|max=%.3e fp32-island=%.3e bound=%.3e\n"
+      (Array.length x.(0)) (Array.length w_gate) (mat_max_abs ref) island bound;
+    gate (label ^ " (fp64)") ours ref64 1e-12 1e-12
   in
   run_case "tiny";
   run_case "mid";
 
-  let x, w_gate, w_up, w_down, _ = load_case "tiny" in
+  let x, w_gate, w_up, w_down, _, _ = load_case "tiny" in
   let hidden = Array.length x.(0) in
   let inter = Array.length w_gate in
   let mlp = Mlp.{ gate_proj = w_gate; up_proj = w_up; down_proj = w_down; } in
@@ -194,6 +202,11 @@ let () =
      (one ulp at 20 is ~2e-6... the grid's largest is 800, where both
      sides are exact). *)
   check "d2c_silu_matches_torch" (max_abs_diff_vec silu_ours silu_ref <= 1e-6);
+  (* And the same grid against torch in fp64. The fp32 grid can only
+     bound this at ~1e-6; on the points it covers, silu is a handful of
+     fp64 operations, so this is summation noise, not a tolerance. *)
+  let silu_ref64 = Safetensors.vec_of_f64 f "d2.silu.ref64" in
+  check "d2c_silu_matches_torch_fp64" (max_abs_diff_vec silu_ours silu_ref64 <= 1e-12);
   Printf.printf "    max|ours-ref| on the grid = %.3e\n" (max_abs_diff_vec silu_ours silu_ref);
   (* The flushed points, where the naive form says 0 or -0 and the
      function says a tiny negative: ours must be strictly negative. A

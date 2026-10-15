@@ -153,7 +153,7 @@ the multimodal (ViT + VLM) work, parity-verified against PyTorch at
 **1e-9**. No Owl, no torch bindings — every op spelled out.
 
 ```bash
-cd ocaml && make ci        # 269 PASS across 14 suites, ~2 min
+cd ocaml && make ci        # 274 PASS across 14 suites, ~2 min
 ```
 
 - [`ocaml/README.md`](ocaml/README.md) — layout, build, how to regenerate

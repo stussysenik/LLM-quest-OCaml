@@ -4,7 +4,7 @@
 
 The goal below was met and then extended. Current state, measured:
 
-- `cd ocaml && make ci` exits 0 — **269 PASS across 14 suites**, from a
+- `cd ocaml && make ci` exits 0 — **274 PASS across 14 suites**, from a
   clean tree, on the pinned venv at `/data/tmp/venv`
   (torch 2.14.1+cpu, transformers 5.19.0, safetensors 0.8.0;
   `pinned.check_pinned()` passes).
@@ -135,3 +135,45 @@ What this pass added on top of the original multimodality goal:
   not do — the reference averages per-batch means and does *not*
   reweight by example count, so the comment now says that instead.
 - 2026-10-15: `make ci` **269 PASS** across 14 suites, exit 0.
+- 2026-10-15: **Verifying the docs found two of them lying again, and a
+  clean-tree bug that had been invisible.** `make ci` from a *clean* tree
+  failed: `test:` listed only up to `test_vlm` as prerequisites, so
+  `test_loader_vlm` / `test_image` / `test_loss` were run but never built
+  — it had been passing off stale binaries. That is the exact inverse of
+  what a CI target is for, and it only shows up after `make clean`.
+  Fixed, and `make ci` re-run from scratch: **274 PASS**, exit 0.
+- 2026-10-15: **D1's 1.29x margin was the whole of HF's fp32 cast.** The
+  RMSNorm gate read 7.767e-07 and the fp32 island (HF's
+  `hidden_states.to(torch.float32)`) is 7.767e-07 — to every printed
+  digit. So the gate was measuring HF's dtype policy against a
+  written-down 1e-6, one BLAS away from a red build that would have
+  looked like a port bug. `export_norm.py` now ships a second reference
+  (`ref64`, torch's own `functional.rms_norm`, which computes in the
+  input dtype), D1a derives its bound from the measured island, and a new
+  D1e gates the port against the fp64 kernel at 1e-12: it reads 4.4e-16
+  and 2.0e-14. Mutation: rounding the port's output to fp32 **passes**
+  D1a and **breaches** D1e at 1.8e-7 — the two gates now demonstrably do
+  different jobs, which one gate could not.
+- 2026-10-15: **D2 had the same defect with no excuse.** `LlamaMLP` has
+  no dtype cast at all — the fp32 reference was purely an export choice —
+  so `mlp_ref` gained `ref64` and the same island-derived bound, plus an
+  fp64 gate reading 4.4e-16 / 2.2e-15, plus one for the silu grid. The
+  comment claiming `LlamaMLP` "casts to float32 before reducing" was
+  false and is gone. Same mutation result: fp32-rounded port passes the
+  fp32 gate, breaches the fp64 one.
+- 2026-10-15: **D3/D4/D5 keep their fp32 references on purpose, and that
+  distinction is now written down.** `llm_quest/common/rope.py` asserts
+  `dtype == torch.float32` and disables autocast for the angle
+  computation; `_compute_llama3_parameters` is fp32; HF's eager
+  attention and its `finfo(float32).min` mask are fp32. There, fp32 is
+  the implementation's behaviour, so the reference is faithful and the
+  gate documents the margin instead of pretending to be tighter. The
+  test is "who chose fp32 — the module, or the export?"
+- 2026-10-15: **ROADMAP's fp64 numbers were from a different machine.**
+  The before/after table said block_0 9.9e-14 / block_11 1.4e-13 /
+  logits 1.7e-13; this machine prints 1.4e-13 / 1.7e-13 / 4.4e-13 and
+  blocks 1-10 at 1.3e-12..2.3e-12. Replaced with the measured column and
+  a note that it is what `make ci` prints here. Same for STUDY.md's
+  "every stage to ~1e-13" and the "now measure 3e-16" claim (worst
+  reading is 2.7e-15).
+

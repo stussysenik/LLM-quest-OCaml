@@ -26,9 +26,11 @@ reference's own fp32 rounding exceeded the gate, and the number moved
 with the machine.
 
 **The fix.** Export reference activations in **float64**, keep weights in
-**F32** as checkpointed. Every stage dropped from ~1e-6 to ~1e-13 and the
-number became platform-independent. The gate went from 1e-6 to **1e-9**,
-seven orders tighter.
+**F32** as checkpointed. Every stage dropped from ~1e-6 to between
+**0.0** (the embedding lookup, bit-identical) and **2.3e-12** (the
+deepest blocks; the final logits read 4.4e-13) and the number became
+platform-independent. The gate went from 1e-6 to **1e-9**, seven orders
+tighter.
 
 **Why fp64 for the reference and F32 for the weights.** Weights are F32
 because that is what a checkpoint *is*; activations are F64 because the
@@ -38,6 +40,44 @@ can hold is set by the less precise of the two.
 **Reusable form.** Before picking a number, run the reference against
 itself at higher precision. If it wobbles, your gate is measuring the
 reference, not the port.
+
+**The same defect at a smaller scale, and the better fix.** This section
+was written for the full-model stages. The per-operator gates (RMSNorm,
+SwiGLU) had the identical problem and hid it behind a written-down
+constant. `LlamaRMSNorm.forward` hard-casts `hidden_states.to(torch.float32)`,
+so its output carries an fp32 *island* — and that island was worth
+7.767e-07 on the mid case, which was, **to every printed digit**, what the
+gate reported. The gate was measuring HF's dtype policy at a 1.29x margin
+against a 1e-6 bound: one BLAS reduction order away from a red build that
+would have looked like a port bug.
+
+Two changes, and the second is the transferable one:
+
+1. **Derive the bound instead of writing it down.** Both references ship
+   (`.ref` fp32, `.ref64` fp64), the gate measures the gap between them in
+   the test, and asserts `|port - ref| <= 2 x island`. The bound now
+   tracks whatever the reference's precision costs on *this* machine.
+   `LlamaMLP` had the same issue with no such excuse — its `forward` has no
+   cast at all, so its fp32 reference was purely an export choice.
+
+2. **Separate "is it faithful" from "is it accurate".** These are two
+   claims and one gate cannot hold both when the reference is imprecise.
+   Now: gate A vs the module as it actually runs (HF's cast included), and
+   gate B vs the same arithmetic in fp64 — for RMSNorm, torch's
+   *own* `functional.rms_norm` kernel, so gate B is not the port's
+   formula echoed back at it.
+
+   The payoff is a single mutation that shows exactly what each gate
+   knows: round the port's output to fp32 and **gate A passes** (an fp32
+   value is indistinguishable from HF's fp32 module — gate A never could
+   have caught this) while **gate B breaches** at 1.8e-07 against 1e-12.
+   See `test_norm.ml` / `test_mlp.ml`, and ROADMAP's D1/D2 rows.
+
+   Not every fp32 reference is a defect, though: `llm_quest/common/rope.py`
+   *asserts* `dtype == torch.float32` and disables autocast, and
+   `_compute_llama3_parameters` is fp32 — there, fp32 is the
+   implementation's behaviour and the reference is faithful. The
+   test is "who chose fp32, the module or the export?"
 
 ---
 
@@ -218,7 +258,9 @@ instead of 1e-9.
 **The fix.** Replaced with a Maclaurin series below 2 and an `erfc`
 continued fraction above: **1.11e-15** on erf, **1.33e-15** on GELU,
 against Python's `math.erf` over 5501 samples on [-12, 115]. All six gates
-moved to 1e-9 and now measure 3e-16.
+moved to 1e-9. Their worst reading in `make ci` is now 2.7e-15
+(`V-f hidden states`, the ViT's deepest margin); the GELU gate itself
+reads 2.2e-16.
 
 **Reusable form.** Every numeric bound in a comment is a claim. Re-derive
 it, and when it turns out to be load-bearing (that 2.11e-07 was holding

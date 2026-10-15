@@ -95,17 +95,34 @@ def export_case(name, hidden, inter, heads, tensors):
         mlp.down_proj.weight.copy_(down)
         ref = mlp(x)
 
+    # The same module in fp64, from the same fp32 weights widened (which is
+    # lossless). LlamaMLP has no dtype pin of its own — every cast in it is
+    # linear-algebra promotion — so unlike LlamaRMSNorm this is purely a
+    # precision choice, and it is the OCaml port's: the port computes in
+    # fp64, so the reference should too. Gating against an fp32 reference
+    # would bound the gate by an error our kernel does not have. Measured
+    # island (fp32 ref vs this) is printed for both cases.
+    with torch.no_grad():
+        mlp64 = LlamaMLP(cfg).double()
+        mlp64.load_state_dict(mlp.state_dict())
+        ref64 = mlp64(x.double())
+
+    x2 = x.reshape(BATCH * SEQ, hidden)
     y = ref.reshape(BATCH * SEQ, hidden).cpu().clone().contiguous()
+    y64 = ref64.reshape(BATCH * SEQ, hidden).cpu().clone().contiguous()
+    island = (y.double() - y64).abs().max().item()
     print(
         f"{name}: x{tuple(x.shape)} -> {tuple(y.shape)}  gate{gate.shape} up{up.shape} "
-        f"down{down.shape}  |ref|max={y.abs().max():.4f}  |x|max={x.abs().max():.4f}"
+        f"down{down.shape}  |ref|max={y.abs().max():.4f}  |x|max={x.abs().max():.4f}  "
+        f"fp32-island={island:.3e}"
     )
 
-    tensors[f"d2.{name}.x"] = x.reshape(BATCH * SEQ, hidden).cpu().clone().contiguous()
+    tensors[f"d2.{name}.x"] = x2.cpu().clone().contiguous()
     tensors[f"d2.{name}.gate_proj"] = gate.cpu().clone().contiguous()
     tensors[f"d2.{name}.up_proj"] = up.cpu().clone().contiguous()
     tensors[f"d2.{name}.down_proj"] = down.cpu().clone().contiguous()
     tensors[f"d2.{name}.ref"] = y
+    tensors[f"d2.{name}.ref64"] = y64
 
 
 def main(out_path):
@@ -124,6 +141,7 @@ def main(out_path):
 
     silu_x = torch.tensor(SILU_POINTS)
     silu_ref = torch.nn.SiLU()(silu_x)
+    silu_ref64 = torch.nn.SiLU()(silu_x.double())
     print(
         "silu grid: " + "  ".join(
             f"{v:g}->{r:.3e}" for v, r in zip(SILU_POINTS, silu_ref.tolist())
@@ -131,6 +149,7 @@ def main(out_path):
     )
     tensors["d2.silu.x"] = silu_x.cpu().clone().contiguous()
     tensors["d2.silu.ref"] = silu_ref.cpu().clone().contiguous()
+    tensors["d2.silu.ref64"] = silu_ref64.cpu().clone().contiguous()
 
     save_file(tensors, out_path)
     print(f"saved {out_path} ({len(tensors)} tensors)")
