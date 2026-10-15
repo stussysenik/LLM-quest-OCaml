@@ -9,7 +9,13 @@
     the destination [float array]s — the 550MB `gpt2` file is held
     once as [bytes], never duplicated as intermediate arrays. *)
 
-type dtype = F32 | F64 | I64
+(** [Bool] is here for one tensor in this project: the repo's
+    [GPTModel] registers [trf_blocks.N.att.mask] as a **persistent bool
+    buffer**, so it is in every real checkpoint — and a reader that only
+    knew F32/F64/I64 cannot open the file at all, before it gets far
+    enough to be wrong about anything. Read as 1.0/0.0, which is what
+    every consumer of a mask wants anyway. *)
+type dtype = F32 | F64 | I64 | Bool
 
 type entry = { dtype : dtype; shape : int list; off_start : int; off_end : int }
 
@@ -148,6 +154,7 @@ let open_file (path : string) : file =
                     | JStr "F32" -> F32
                     | JStr "F64" -> F64
                     | JStr "I64" -> I64
+                    | JStr "BOOL" -> Bool
                     | JStr d -> failwith ("Safetensors: unsupported dtype " ^ d)
                     | _ -> failwith "Safetensors: bad dtype field"
                   in
@@ -179,6 +186,36 @@ let find (f : file) (name : string) : entry =
 
 let names (f : file) : string list = List.map fst f.entries
 
+(** A view of [f] containing only the keys under [prefix], with that
+    prefix removed.
+
+    Exists because the fusion checkpoint holds **three models in one
+    file** — the vision encoder under [vit.], the adapter under
+    [adapter.], the decoder under [gpt.] — while each loader asserts an
+    exact key set. Threading a prefix through every call site of every
+    loader would work and would also put a [prefix] argument on twenty
+    lines that have no other reason to know one. Slicing the file instead
+    keeps each loader single-purpose: it sees exactly its own tensors,
+    under exactly the names it claims, and [assert_exact_keys] does its
+    job on them.
+
+    Raises if a key matches the prefix but not after stripping it (a key
+    equal to the prefix alone), which would otherwise vanish silently. *)
+let subset (f : file) ~(prefix : string) : file =
+  if prefix = "" then f
+  else
+    let entries =
+      List.filter_map
+        (fun (name, e) ->
+          if not (String.starts_with ~prefix name) then None
+          else
+            let stripped = String.sub name (String.length prefix) (String.length name - String.length prefix) in
+            if stripped = "" then failwith (Printf.sprintf "Safetensors.subset: key %s is only a prefix" name);
+            Some (stripped, e))
+        f.entries
+    in
+    { data = f.data; entries }
+
 let shape_str (s : int list) : string = "[" ^ String.concat ";" (List.map string_of_int s) ^ "]"
 
 (** A tensor this loader must NOT find. Llama has no biases anywhere and
@@ -192,14 +229,21 @@ let require_absent (f : file) (name : string) : unit =
 (** Every tensor in the file must be claimed, and every claimed tensor
     must exist. [skip_prefix] covers the [ref.*] namespace: the parity
     harness keeps weights and reference activations in one file, and the
-    reference is not the loader's business. Everything else must match
-    [expected] exactly — so a GPT-2 file handed to the Llama loader
-    fails here naming the first unexpected key, which is the right way
-    to find out. *)
+    reference is not the loader's business. **An empty [skip_prefix]
+    skips nothing** — without that, every key matches the empty prefix,
+    [present] comes out empty, and the function reports the entire
+    expected key set as missing. A loader handed a file with no [ref.*]
+    namespace has no reason to pass one at all, so "" has to mean "no
+    namespace" and not "the namespace of every string". Everything else
+    must match [expected] exactly — so a GPT-2 file handed to the Llama
+    loader fails here naming the first unexpected key, which is the right
+    way to find out. *)
 let assert_exact_keys (f : file) ~(skip_prefix : string) (expected : string list) : unit =
   let claimed = List.sort_uniq compare expected in
   let present =
-    List.sort_uniq compare (List.filter (fun k -> not (String.starts_with ~prefix:skip_prefix k)) (names f))
+    List.sort_uniq compare
+      (if skip_prefix = "" then names f
+       else List.filter (fun k -> not (String.starts_with ~prefix:skip_prefix k)) (names f))
   in
   let missing = List.filter (fun k -> not (List.mem k present)) claimed in
   let unexpected = List.filter (fun k -> not (List.mem k claimed)) present in
@@ -347,6 +391,48 @@ let get_vector (f : file) (name : string) ~(expected_len : int) : Tensor.vec =
       (Printf.sprintf "Safetensors: %s has shape %s, expected [%d]" name (shape_str e.shape)
          expected_len);
   vec_of f name
+
+(** Read an N-dimensional [F32] tensor as its flat row-major element
+    sequence, asserting the shape it must have.
+
+    Exists for exactly one tensor in this project: the ViT's
+    [conv_proj.weight], stored by [nn.Conv2d] as the 4-D
+    [(emb_dim, num_channels, P, P)]. [mat_of] refuses a non-2-D tensor and
+    [vec_of] refuses a non-1-D one, and neither should be bent to fit —
+    the 4 axes are the layout ([Vit.patch_conv.conv_weight] keeps them
+    visible rather than collapsing to [(out, in)]), so the reader exposes
+    the raw row-major order and the loader does the reshape it means. *)
+let get_flat (f : file) (name : string) ~(expected_shape : int list) : float array =
+  let e = find f name in
+  if e.shape <> expected_shape then
+    failwith
+      (Printf.sprintf "Safetensors: %s has shape %s, expected %s" name (shape_str e.shape)
+         (shape_str expected_shape));
+  if e.dtype <> F32 then failwith ("Safetensors.get_flat: not F32: " ^ name);
+  let numel = List.fold_left ( * ) 1 expected_shape in
+  if e.off_end - e.off_start <> numel * 4 then failwith ("Safetensors: size mismatch: " ^ name);
+  Array.init numel (fun i -> Int32.float_of_bits (Bytes.get_int32_le f.data (e.off_start + (i * 4))))
+
+(** Read a 2D [Bool] tensor as a [Tensor.mat] of 1.0/0.0 floats.
+
+    safetensors stores BOOL as one byte per element, and PyTorch's bool
+    buffer round-trips as 0 or 1 — so the read is a byte comparison, not
+    a float decode. Returned as floats because every mask consumer wants
+    to multiply by it. *)
+let mat_of_bool (f : file) (name : string) : Tensor.mat =
+  let e = find f name in
+  if e.dtype <> Bool then failwith ("Safetensors.mat_of_bool: not BOOL: " ^ name);
+  let rows, cols =
+    match e.shape with
+    | [ r; c ] -> (r, c)
+    | _ -> failwith ("Safetensors.mat_of_bool: not 2D: " ^ name)
+  in
+  if e.off_end - e.off_start <> rows * cols then
+    failwith ("Safetensors.mat_of_bool: size mismatch: " ^ name);
+  Array.init rows (fun i ->
+      Array.init cols (fun j ->
+          let o = e.off_start + ((i * cols) + j) in
+          if Bytes.get_uint8 f.data o = 0 then 0.0 else 1.0))
 
 let i64_array_of (f : file) (name : string) : int64 array =
   let e = find f name in

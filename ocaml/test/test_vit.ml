@@ -197,9 +197,9 @@ let run_case (f : Safetensors.file) (name : string) ~(img_h : int) ~(img_w : int
 
   (* ---- V-f: the whole model ---- *)
   let our_hidden = Vit.forward_hidden_states model img in
-  gate "V-f hidden states" our_hidden ref_hidden 1e-6 1e-6;
+  gate "V-f hidden states" our_hidden ref_hidden 1e-9 1e-9;
   let our_logits = Vit.forward model img in
-  gate_vec "V-f logits (CLS head)" our_logits ref_logits 1e-6 1e-6;
+  gate_vec "V-f logits (CLS head)" our_logits ref_logits 1e-9 1e-9;
 
   (* ---- V-c: logits are the CLS token, not a pool or the last position ---- *)
   let cls_head = Attention.linear_forward_batch model.Vit.classifier [| our_hidden.(0) |] |> fun r -> r.(0) in
@@ -286,10 +286,21 @@ let () =
     exit 2);
   let f = Safetensors.open_file Sys.argv.(1) in
   Printf.printf "ViT gates (multimodal Part 1)\n";
-  (* The GELU the ViT FFN uses, against torch's exact erf. This is the one
-     op in the port that is an approximation rather than a formula, and it
-     is what sets V-f's 1e-6 gate instead of 1e-9 — so it gets its own gate
-     rather than being folded silently into a tolerance. *)
+  (* The GELU the ViT FFN uses, against torch's exact erf. This was the
+     one op in the port that was an approximation rather than a formula,
+     and while it was one it is what set V-f's tolerance at 1e-6 instead
+     of 1e-9 — hence its own gate rather than a silent tolerance.
+
+     It is no longer an approximation: [Norm.erf] is a Maclaurin series
+     below 2 and an erfc continued fraction above, measuring 1.11e-15 on
+     erf over [-12, 115]. So the bound moves with it, to 1e-13 — ~2e6
+     tighter than the Abramowitz & Stegun 7.1.26 polynomial's 2.12e-07,
+     which is the point. At the old 2.2e-7 bound this gate would have
+     measured 2.2e-16 and passed on a library swapped straight back to the
+     polynomial it replaced, which is the "gate that cannot fail" shape
+     this repo has now found and fixed three times. 1e-13 is far enough
+     above the measured 2.22e-16 to survive a ULP of drift, and far enough
+     below 2.12e-07 to mean something. *)
   let gx = Safetensors.vec_of_f64 f "v1.gelu.x" in
   let gref = Safetensors.vec_of_f64 f "v1.gelu.ref" in
   let gours = Array.map Norm.gelu_scalar gx in
@@ -297,13 +308,13 @@ let () =
   for i = 0 to Array.length gx - 1 do
     gerr := max !gerr (abs_float (gours.(i) -. gref.(i)))
   done;
-  Printf.printf "GELU vs torch.erf: max_abs_diff=%.3e (A&S 7.1.26, measured max 2.12e-07 over [-12,12])\n" !gerr;
-  if !gerr < 2.2e-7 then (
+  Printf.printf "GELU vs torch.erf: max_abs_diff=%.3e (bound 1e-13; A&S 7.1.26 would read 2.12e-07)\n" !gerr;
+  if !gerr < 1e-13 then (
     incr passed;
-    Printf.printf "PASS V-g GELU within its documented approximation bound\n")
+    Printf.printf "PASS V-g GELU is fp64-accurate, not merely bounded\n")
   else (
     incr failed;
-    Printf.printf "FAIL V-g GELU exceeds its approximation bound: %.3e\n" !gerr);
+    Printf.printf "FAIL V-g GELU exceeds 1e-13: %.3e\n" !gerr);
 
   run_case f "small" ~img_h:8 ~img_w:8 ~patch:2 ~chans:3 ~emb:32 ~layers:3 ~heads:2 ~classes:5;
   run_case f "odd" ~img_h:6 ~img_w:6 ~patch:3 ~chans:3 ~emb:48 ~layers:2 ~heads:4 ~classes:7;

@@ -24,12 +24,14 @@
      so V2-a cannot be satisfied by an identity adapter — that is the
      reason for the mismatch, not an accident of it.
 
-     Tolerances: V2-a, V2-b and V2-e run at 1e-6 rather than 1e-9 because
-     everything they measure has already passed through the ViT, whose FFN
-     uses [Norm.gelu_scalar] — the port's one approximation (measured
-     2.11e-07, gate V-g in test_vit), landing ~2e-8 in every downstream
-     tensor. V2-c is gated at 1e-9 because token + positional embeddings
-     never touch the ViT and are exact; it measures 0.000e+00. *)
+     Tolerances: every gate here runs at 1e-9. It used to be 1e-6 for
+     V2-a/b/e, because everything they measure had already passed through
+     the ViT, whose FFN uses [Norm.gelu_scalar] — then the port's one
+     approximation, at a measured 2.11e-07, landing ~2e-8 in every
+     downstream tensor regardless of adapter. [Norm.erf] replaced it (1.11e-15
+     on erf over [-12, 115], gate V-g in test_vit), so the excuse went with
+     it and the gates went to the exact-path tolerance they were always
+     waiting for. They now measure 3e-16. *)
 
 open Tensor
 
@@ -279,21 +281,23 @@ let run_case (f : Safetensors.file) (name : string) ~(adapter_type : string) ~(v
   if Array.length ids <> text_len || Array.length text_mask <> text_len then
     failwith "test_vlm: input length mismatch";
 
-  (* One tolerance for both cases, 1e-6 rather than the exact-path 1e-9.
-     It is tempting to gate the simple adapter at 1e-9 because it is a bare
-     linear with no GELU — but the ViT feeding it is the same ViT, and its
-     FFN goes through [Norm.gelu_scalar], the port's one approximation.
-     That ~2e-8 lands in every downstream tensor regardless of adapter, so
-     a tighter bound here is not measuring the adapter, it is re-gating V-g
-     of test_vit and failing on it. *)
-  let tol = 1e-6 in
+  (* One tolerance for both cases, and it is the exact-path 1e-9. The
+     simple adapter is tempting to gate separately from the ffn one — it is
+     a bare linear with no GELU — but the ViT feeding it is the same ViT,
+     and its FFN goes through [Norm.gelu_scalar]. While that op was an
+     approximation at 2.11e-07 it put ~2e-8 in every downstream tensor
+     regardless of adapter, so a tighter bound here was not measuring the
+     adapter, it was re-gating V-g of test_vit and failing on it. With
+     [Norm.erf] the difference is gone and one tolerance is simply the
+     right answer for both branches. *)
+  let tol = 1e-9 in
 
   Printf.printf "\n%s: %s adapter, %d vit_emb -> %d llm_emb, %d vision + %d text = %d\n" name
     adapter_type vit_emb llm_emb n_vit text_len seq;
 
   (* ---- V2-a: the adapter is a real projection ---- *)
   let vit_hidden = Vit.forward_hidden_states vit img in
-  gate (Printf.sprintf "V2-a vit hidden states (%s)" name) vit_hidden (Safetensors.mat_of_f64 f (g "ref_vit_hidden")) 1e-6 1e-6;
+  gate (Printf.sprintf "V2-a vit hidden states (%s)" name) vit_hidden (Safetensors.mat_of_f64 f (g "ref_vit_hidden")) 1e-9 1e-9;
   let vision = Vlm.vision_embeddings model ~image:img in
   gate (Printf.sprintf "V2-a adapter output (%s)" name) vision (Safetensors.mat_of_f64 f (g "ref_vision")) tol tol;
   (* Widths differ, so a "skipped adapter" cannot typecheck — but a

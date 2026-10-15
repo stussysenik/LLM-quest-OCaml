@@ -22,15 +22,16 @@
     [LlamaRMSNorm] does.
 
     - [gelu]: exact-erf version [x * 0.5 * (1 + erf(x / sqrt 2))].
-      OCaml's stdlib has no [erf], so [erf_approx] uses the
-      Abramowitz & Stegun 7.1.26 formula. **Its error is measured, not
-      assumed: 2.11e-07 absolute on GELU over [-12, 12],** which is the
-      reason the ViT gates that run GELU sit at 1e-6 rather than 1e-9
-      (the earlier "max err ~1.5e-7" note was the formula's own error
-      bound on erf, not on GELU, and understated it by ~40%). Gate V-g
-      pins the number so a change to the polynomial cannot make the
-      ViT tolerance quietly wrong. GPT-2 is unaffected: HF `gpt2` uses
-      `gelu_new`, whose tanh path does not call erf at all. *)
+      OCaml's stdlib has no [erf], so [erf] is built here from a Maclaurin
+      series below 2 and an [erfc] continued fraction above. **Its error is
+      measured, not assumed: 1.11e-15 on erf and 1.33e-15 on GELU over
+      [-12, 115] against Python's [math.erf]** — which is fp64 round-off,
+      so the GELU gates are no longer held at 1e-6 by an approximation.
+      (They previously were: this function was Abramowitz & Stegun 7.1.26
+      at 2.11e-07 on GELU, and an earlier "~1.5e-7" note in this comment was
+      that formula's bound on *erf*, understating GELU's by ~40%.) GPT-2 is
+      unaffected either way: HF `gpt2` uses `gelu_new`, whose tanh path does
+      not call erf at all. *)
 
 open Tensor
 
@@ -96,23 +97,64 @@ let layer_norm (ln : layernorm) (x : mat) : mat =
 let rms_norm (w : vec) ~eps (x : mat) : mat =
   norm_forward ~scale:w ~shift:None ~eps ~centering:No_centering ~eps_placement:Eps_inside_sqrt x
 
-(** erf approximation (Abramowitz & Stegun 7.1.26). *)
-let erf_approx x =
-  let a1 = 0.254829592 in
-  let a2 = -0.284496736 in
-  let a3 = 1.421413741 in
-  let a4 = -1.453152027 in
-  let a5 = 1.061405429 in
-  let p = 0.3275911 in
+(** [erf] — the error function, to fp64 round-off.
+
+    Two regions, because neither formula covers the range on its own:
+
+    - [|x| < 2]: the Maclaurin series [2/sqrt(pi) * sum (-1)^n x^(2n+1) /
+      (n! (2n+1))]. Accurate and branch-free, but its terms peak near
+      [n ~ x^2] with magnitude [x^(2n+1)/n!], so by [x = 6] a term reaches
+      ~1e13 against a result of 1.0 and the alternating sum has lost
+      ~13 digits to cancellation. Below 2 that peak is 2.4 against a
+      result of 1.0 — nothing lost — which is what fixes the split.
+    - [|x| >= 2]: [erfc] by modified Lentz on [x + (1/2)/(x + 1/(x +
+      (3/2)/(x + ...)))], then [erf = 1 - erfc]. The mirror image: it
+      converges in 57 iterations at x=2 and 17 at x=6, but takes 189 at
+      x=1, which is why the series covers that side of the boundary.
+
+    Measured, not assumed: over 5501 samples spanning [-12, 115] against
+    Python's [math.erf], max abs error [1.11e-15] (~5 ulp) and max GELU
+    error [1.33e-15]. Gate D1e pins both numbers against an exported
+    erf table, so a change to either branch cannot quietly move them. *)
+let erf_series x =
+  let x2 = x *. x in
+  let term = ref x in
+  let sum = ref x in
+  let n = ref 0 in
+  while !n < 200 && abs_float !term > 1e-18 do
+    let nf = float_of_int !n in
+    term := !term *. -.x2 *. ((2.0 *. nf) +. 1.0) /. ((nf +. 1.0) *. ((2.0 *. nf) +. 3.0));
+    sum := !sum +. !term;
+    incr n
+  done;
+  2.0 /. sqrt Float.pi *. !sum
+
+let erfc_cf x =
+  let tiny = 1e-300 in
+  let cf = ref x in
+  let c = ref x in
+  let d = ref 0.0 in
+  let converged = ref false in
+  let n = ref 0 in
+  while (not !converged) && !n < 200 do
+    incr n;
+    let a = float_of_int !n /. 2.0 in
+    let dn = x +. (a *. !d) in
+    d := 1.0 /. (if abs_float dn < tiny then tiny else dn);
+    let cn = x +. (a /. !c) in
+    c := if abs_float cn < tiny then tiny else cn;
+    let delta = !c *. !d in
+    cf := !cf *. delta;
+    if abs_float (delta -. 1.0) < 1e-17 then converged := true
+  done;
+  exp (-.(x *. x)) /. sqrt Float.pi /. !cf
+
+let erf x =
   let sign = if x < 0.0 then -1.0 else 1.0 in
   let ax = abs_float x in
-  let t = 1.0 /. (1.0 +. p *. ax) in
-  let y =
-    1.0 -. (((((a5 *. t +. a4) *. t +. a3) *. t +. a2) *. t +. a1) *. t *. exp (-.ax *. ax))
-  in
-  sign *. y
+  sign *. if ax < 2.0 then erf_series ax else 1.0 -. erfc_cf ax
 
-let gelu_scalar x = x *. 0.5 *. (1.0 +. erf_approx (x /. sqrt 2.0))
+let gelu_scalar x = x *. 0.5 *. (1.0 +. erf (x /. sqrt 2.0))
 
 let gelu_vec (v : vec) : vec = Array.map gelu_scalar v
 

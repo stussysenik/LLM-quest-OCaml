@@ -1,6 +1,6 @@
 # rope.ml precedes attention.ml: GroupedQueryAttention applies RoPE to Q/K
 # internally, matching llama_attention.py's forward(x, mask, cos, sin, ...).
-LIB = lib/tensor.ml lib/config.ml lib/norm.ml lib/mlp.ml lib/rope.ml lib/kv_cache.ml lib/safetensors.ml lib/attention.ml lib/block.ml lib/sampling.ml lib/gpt.ml lib/llama.ml lib/gpt2_loader.ml lib/llama_loader.ml lib/vit.ml lib/vlm.ml
+LIB = lib/tensor.ml lib/config.ml lib/norm.ml lib/mlp.ml lib/rope.ml lib/kv_cache.ml lib/safetensors.ml lib/attention.ml lib/block.ml lib/sampling.ml lib/gpt.ml lib/llama.ml lib/gpt2_loader.ml lib/llama_loader.ml lib/vit.ml lib/vlm.ml lib/vit_loader.ml lib/gpt_repo_loader.ml lib/vlm_loader.ml
 # Every reference file lives in one directory. Override it in one place
 # rather than per-file: the defaults point at /data/tmp, which is read-only
 # on macOS (SIP), so a fresh machine has to move the whole set anyway and
@@ -23,6 +23,7 @@ REF_ROPE_LLAMA3 ?= $(PARITY_DIR)/rope_llama3_ref.safetensors
 REF_GQA ?= $(PARITY_DIR)/gqa_ref.safetensors
 REF_VIT ?= $(PARITY_DIR)/vit_ref.safetensors
 REF_VLM ?= $(PARITY_DIR)/vlm_ref.safetensors
+REF_VLM_LOADER ?= $(PARITY_DIR)/vlm_loader_ref.safetensors
 # Parity is parameterized by family; the dispatch lives in test/parity.ml,
 # so a new family is a new loader + export script, not a new target.
 FAMILY ?= gpt2
@@ -59,6 +60,9 @@ test_vit: $(LIB) test/test_vit.ml
 test_vlm: $(LIB) test/test_vlm.ml
 	ocamlopt -I lib -o test_vlm $(LIB) test/test_vlm.ml
 
+test_loader_vlm: $(LIB) test/test_loader_vlm.ml
+	ocamlopt -I lib -o test_loader_vlm $(LIB) test/test_loader_vlm.ml
+
 demo: $(LIB) bin/main.ml
 	ocamlopt -I lib -o demo $(LIB) bin/main.ml
 
@@ -85,6 +89,8 @@ test: test_all test_batched test_kv test_loader test_norm test_mlp test_rope tes
 	./test_vit $(REF_VIT)
 	@test -f $(REF_VLM) || (echo "vlm reference not found: $(REF_VLM) -- run: python ocaml/parity/export_vlm.py $(REF_VLM)" && exit 1)
 	./test_vlm $(REF_VLM)
+	@test -f $(REF_VLM_LOADER) || (echo "vlm loader reference not found: $(REF_VLM_LOADER) -- run: python ocaml/parity/export_loader.py $(REF_VLM_LOADER)" && exit 1)
+	./test_loader_vlm $(REF_VLM_LOADER)
 
 demo-run: demo
 	./demo
@@ -122,6 +128,6 @@ parity-llama-forward: parity_check
 ci: test parity parity-kv parity-gen parity-llama-forward
 
 clean:
-	rm -f test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
+	rm -f test_all test_batched test_kv test_loader test_norm test_mlp test_rope test_gqa test_vit test_vlm test_loader_vlm demo parity_check parity_kv parity_gen lib/*.cmi lib/*.cmx lib/*.o test/*.cmi test/*.cmx test/*.o bin/*.cmi bin/*.cmx bin/*.o
 
 .PHONY: all test demo-run parity parity-kv parity-gen parity-llama-forward ci clean
